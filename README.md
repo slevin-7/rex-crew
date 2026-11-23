@@ -62,7 +62,7 @@ Nothing is copied; `install.sh --uninstall` removes the two links. Agents then f
 export REX_CREW_HOST=buildbox
 export REX_CREW_SESSION=$(rex-crew session my-task)     # creates the session on the host if missing
 
-rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--trust] [--keep] [-- CLAUDE_ARGS]
+rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [-- CLAUDE_ARGS]
 
 # several at once: one checkout each, start all, collect
 A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
@@ -80,8 +80,8 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 rex-crew status                      # every reporting pane: state and open question
 ```
 
-Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a symlinked or oversized report, failed verify,
-uncommitted changes), `2` needs you, `3` timeout, `4` error, `5` pane gone.
+Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or oversized report, failed or hung verify,
+uncommitted changes, host output cut), `2` needs you, `3` timeout, `4` error, `5` pane gone.
 `collect` hands back as soon as any worker needs you (whatever the other workers' codes), looks at every worker at least
 once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits 6
 for a NAME it has never started. A pane counts as gone only after two failed status calls in a row.

@@ -146,8 +146,8 @@ def ledger_lock():
         f.close()
 
 
-def ledger_update(run):
-    with ledger_lock():
+def ledger_update(run, locked=False):
+    with contextlib.nullcontext() if locked else ledger_lock():
         runs = [r for r in ledger_raw() if not (isinstance(r, dict) and r.get("id") == run["id"])] + [run]
         while len(runs) > 300:  # the cap drops the oldest finished entry, never a live worker
             i = next((i for i, r in enumerate(runs) if not (isinstance(r, dict) and r.get("state") in LIVE)), None)
@@ -299,20 +299,39 @@ def tick(rex, run, policy):
 def start(rex, a, agent_args):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", a.name):
         die("NAME must be lowercase a-z0-9_- and at most 32 characters", 2)
-    with ledger_lock():  # fail before any pane exists if the ledger cannot be written
-        pass
-    busy = [r for r in mine(rex) if r["dir"].rstrip("/") == a.dir.rstrip("/")]
-    for r in list(busy):
-        if rex.status(r["block"]).get("state") == "gone":  # its pane is closed: it cannot hold the directory
-            r["state"] = "gone"
-            ledger_update(r)
-            busy.remove(r)
-    if busy:
-        die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
     try:  # bytes, not text: a task that is not UTF-8 or has CRLF line ends must arrive as written
         task = sys.stdin.buffer.read() if a.task == "-" else open(os.path.expanduser(a.task), "rb").read()
     except OSError as e:
         die(f"cannot read the task: {e}", 2)
+    # A symlinked DIR and its real path are the same directory: compare what the host resolves.
+    _, rd = rex.sh(f"printf '@@DIR %s@@END\\n' \"$(cd -- {shlex.quote(a.dir)} 2>/dev/null && pwd -P)\"")
+    hit = re.search(r"@@DIR (.+?)@@END", rd, re.S)
+    real = hit.group(1) if hit else a.dir
+    same = lambda r: r["dir"].rstrip("/") == a.dir.rstrip("/") or r.get("real", r["dir"]).rstrip("/") == real.rstrip("/")
+    for r in [r for r in mine(rex) if same(r)]:
+        if rex.status(r["block"]).get("state") == "gone":  # its pane is closed: it cannot hold the directory
+            r["state"] = "gone"
+            ledger_update(r)
+    # Check and claim under one lock: two starts at the same moment must not both pass. A claim that never
+    # became a worker (the start died half way) stops counting after a while.
+    with ledger_lock():
+        busy = [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session and same(r)
+                and (r["state"] in LIVE or (r["state"] == "starting" and time.time() - r.get("t0", 0) < 120))]
+        if busy:
+            die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
+        claim = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "real": real,
+                 "host": rex.host or "", "session": rex.session, "block": "", "state": "starting", "t0": time.time(),
+                 "started": time.strftime("%Y-%m-%d %H:%M")}
+        ledger_update(claim, locked=True)
+    try:
+        return launch(rex, a, agent_args, task, claim)
+    except BaseException:
+        claim["state"] = "gone"
+        ledger_update(claim)
+        raise
+
+
+def launch(rex, a, agent_args, task, claim):
     task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md").encode()
     b64, d = base64.b64encode(task).decode(), shlex.quote(a.dir)
     # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
@@ -330,9 +349,8 @@ def start(rex, a, agent_args):
     line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd -- " + d
             + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
     p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
-    run = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "host": rex.host or "", "session": rex.session,
-           "block": jload(p.stdout)["block_ids"][0], "verify": a.verify, "trust": a.trust, "keep": a.keep,
-           "state": "open", "t0": time.time(), "started": time.strftime("%Y-%m-%d %H:%M")}
+    run = {**claim, "block": jload(p.stdout)["block_ids"][0], "verify": a.verify, "verify_timeout": a.verify_timeout,
+           "trust": a.trust, "keep": a.keep, "state": "open", "t0": time.time()}
     ledger_update(run)
     return run
 
@@ -340,13 +358,21 @@ def start(rex, a, agent_args):
 def finish(rex, run):
     """What is really on disk: the report file, git, and the verify command's exit status."""
     d, verify, m = shlex.quote(run["dir"]), run.get("verify"), f"@@{os.urandom(6).hex()}"
+    vt = int(run.get("verify_timeout") or 600)
     f = f".rex-crew/report-{run['name']}.md"
     # A worker controls the report path: never follow a symlink out of the directory, never ship more than REPORT_MAX bytes.
     rep = (f"if [ -L .rex-crew ] || [ -L {f} ]; then printf @LINK@; elif [ -f {f} ]; then head -c {REPORT_MAX + 1} {f} | base64 | tr -d '\\n'; fi; echo; ")
     script = (f"cd -- {d} || exit 97; echo {m}REPORT; {rep}"
               f"echo {m}GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"branch $(git branch --show-current 2>/dev/null) · dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-              f"echo {m}VERIFY; " + (f"( {verify}\n) </dev/null >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$ | tail -c 4000; rm -f /tmp/rex-crew-verify.$$; echo {m}RC $rc" if verify else f"echo {m}RC none"))
-    _, out = rex.sh(script)
+              f"echo {m}VERIFY; " + (
+                  # A watchdog kills the verify command and all its children when it hangs (no job control: not every sh has it).
+                  "kt() { set -- \"$1\" \"$2\" $(ps -A -o pid= -o ppid= | awk -v p=\"$1\" '$2==p{print $1}'); kill -s \"$2\" \"$1\" 2>/dev/null; s=$2; shift 2; for c; do kt \"$c\" \"$s\"; done; }; "
+                  f"vf=$(mktemp \"${{TMPDIR:-/tmp}}/rex-crew-verify.XXXXXX\") || exit 96; "
+                  f"( {verify}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
+                  f"( sleep {vt}; : > \"$vf.to\"; kt $vp TERM; sleep 3; kt $vp KILL ) </dev/null >/dev/null 2>&1 & wp=$!; "
+                  f"wait $vp 2>/dev/null; rc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then rc=timeout; fi; "
+                  f"tail -n 15 \"$vf\" | tail -c 4000; rm -f \"$vf\" \"$vf.to\"; echo {m}RC $rc" if verify else f"echo {m}RC none"))
+    rc0, out = rex.sh(script)
     part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
     notes, raw = [], part(m + "REPORT", m + "GIT")
     try:
@@ -359,15 +385,23 @@ def finish(rex, run):
         body = body[:REPORT_MAX]
         notes.append(f"the report is longer than {REPORT_MAX} bytes: cut")
     report = body.decode("utf-8", "replace").strip()
+    if rc0 == 97:
+        notes.append("the directory is gone on the host: nothing could be read")
+    elif m + "REPORT" not in out or m + "RC" not in out:
+        notes.append("the host's output is incomplete (the terminal kept only its last lines, or the command died): report, git and verify may be missing")
     rc = re.search(re.escape(m) + r"RC (\S+)", out)
     res = {"report": report, "git": part(m + "GIT", m + "VERIFY"),
            "verify_tail": part(m + "VERIFY", m + "RC") if verify else "", "verify_rc": rc.group(1) if rc else "unknown"}
     # "done" only means the turn ended. Say plainly when the result is not clean.
-    said = re.search(r"^STATUS:\s*(\w+)", report, re.M)
+    # The template line `STATUS: done | blocked | failed` is not an answer, and neither is a missing line.
+    said = [w.lower() for w, rest in re.findall(r"^STATUS:\s*[*`_]*(\w+)[*`_]*(.*)$", report, re.M) if "|" not in rest]
+    said = [w for w in said if w in ("done", "blocked", "failed")]
     res["attention"] = notes + [x for x in (
         None if report or notes else "the worker wrote no report file",
-        None if not said or said.group(1).lower() == "done" else f"the worker reports STATUS {said.group(1)}",
-        None if res["verify_rc"] in ("0", "none") else f"verify failed (exit {res['verify_rc']})",
+        None if not report or said else "the report has no STATUS line (done, blocked or failed); do not read it as clean",
+        None if all(w == "done" for w in said) else f"the worker reports STATUS {next(w for w in said if w != 'done')}",
+        None if res["verify_rc"] in ("0", "none") else (f"verify did not finish within {vt}s and was killed" if res["verify_rc"] == "timeout"
+                                                        else f"verify failed (exit {res['verify_rc']})"),
         None if not re.search(r"dirty [1-9]", res["git"]) else "uncommitted changes in the directory") if x]
     return res
 
@@ -461,19 +495,37 @@ def cmd_checkout(rex, a):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name):
         die("NAME must be lowercase a-z0-9_- and at most 32 characters", 2)
     # The host resolves the repo path (a relative one is relative to the host's directory, not ours).
-    copies = "".join(f" && cp -R \"$r\"/{shlex.quote(c)} \"$wt\"/{shlex.quote(c)}" for c in a.copy)
+    copies = "".join(f" cp -R \"$r\"/{shlex.quote(c)} \"$wt\"/{shlex.quote(c)} &&" for c in a.copy)
+    br = shlex.quote(a.branch or "crew/" + name)
+    # A copy that fails removes the worktree and branch again, so a retry does not die with "branch exists".
     rc, out = rex.sh(f"r=$(cd -- {shlex.quote(a.repo)} && pwd) || exit 97; "
                      f"wt=\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{name}\"; "
-                     f"cd -- \"$r\" && git worktree add -q -b {shlex.quote(a.branch or 'crew/' + name)} "
-                     f"\"$wt\" {shlex.quote(a.base)}{copies} && echo \"@@WT $wt\"")
+                     f"if [ -e \"$wt\" ]; then echo \"@@EXISTS $wt\"; exit 3; fi; "
+                     f"cd -- \"$r\" && git worktree add -q -b {br} \"$wt\" {shlex.quote(a.base)} && "
+                     f"{{{copies} :; }} || {{ if [ -d \"$wt\" ]; then echo @@COPYFAIL; git worktree remove --force \"$wt\" >/dev/null 2>&1; "
+                     f"rm -rf \"$wt\"; git worktree prune; git branch -D {br} >/dev/null 2>&1; fi; exit 1; }}; echo \"@@WT $wt\"")
     hit = re.search(r"^@@WT (.+)$", out, re.M)
     if not hit:
+        ex = re.search(r"^@@EXISTS (.+)$", out, re.M)
+        if ex:
+            die(f"checkout failed: {ex.group(1).strip()} already exists (a worker of that name has a checkout): use it, "
+                "or remove it with `git worktree remove` first, or pick another NAME", 2)
+        if "@@COPYFAIL" in out:
+            die(f"checkout failed while copying: {out.replace('@@COPYFAIL', '').strip()[-300:]}\n"
+                "the new worktree and branch were removed again; fix the --copy path and retry")
+        if "already exists" in out:
+            die(f"checkout failed: the branch {a.branch or 'crew/' + name} already exists: pass --branch, or delete the old branch. {out.strip()[-200:]}")
         die(f"checkout failed: {out.strip()[-300:]}")
     print(hit.group(1).strip())
 
 
 def cmd_sh(rex, a):
-    rc, out = rex.sh(" ".join(a.command))
+    m = f"@@{os.urandom(6).hex()}"
+    rc, out = rex.sh(f"echo {m}BEGIN; " + " ".join(a.command))
+    if m + "BEGIN" in out:
+        out = out.split(m + "BEGIN", 1)[1].lstrip("\n")
+    else:  # the terminal keeps only its last lines: say that the start of the output is missing
+        print("rex-crew: the output is cut: the host's terminal kept only its last lines, the beginning is missing", file=sys.stderr)
     print(out.rstrip())
     sys.exit(rc)
 
@@ -590,6 +642,7 @@ def main():
         q.add_argument("name"); q.add_argument("dir"); q.add_argument("task", help="task file, or - for stdin")
         q.add_argument("--verify", help="shell command run in DIR on the host afterwards; its exit status is reported")
         q.add_argument("--trust", action="store_true", help="confirm the folder-trust dialog if it names DIR")
+        q.add_argument("--verify-timeout", type=int, default=600, help="seconds the verify command may run before it is killed (default 600)")
         q.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
 
     r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it")
