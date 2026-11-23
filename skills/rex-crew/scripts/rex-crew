@@ -102,6 +102,7 @@ def parts(text):
     if tool != "Bash" or not sep:
         return [text]
     try:
+        body = re.sub(r"\d?>&\d", "", body)  # 2>&1 is a redirection, not a command separator
         lex = shlex.shlex(body, posix=True, punctuation_chars=";&|")
         lex.whitespace_split = True
         out, cur = [], []
@@ -302,6 +303,7 @@ def selftest():
     assert not routine("Bash: git push", ap, nv) and not routine("", ap, nv)
     assert routine("Bash: git status; rtk git log -3", ap, nv)
     assert not routine("Bash: git status; whoami", ap, nv)
+    assert parts("Bash: make test 2>&1 | tail -3") == ["Bash: make test", "Bash: tail -3"]
     assert parts('Bash: grep "a|b" f | head') == ["Bash: grep a|b f", "Bash: head"]
     assert question({"kind": "permission", "msg": "hook failed · approve Bash: ls"}) == ("permission", "Bash: ls")
     assert question({}) == ("", "")
