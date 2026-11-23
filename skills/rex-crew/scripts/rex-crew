@@ -180,11 +180,24 @@ def question(rec):
 
 
 def load_policy(path):
+    """The policy's two pattern lists. Anything off is a clear exit 2, never a half-read policy."""
     if not path:
         return [], []
-    with open(os.path.expanduser(path)) as f:
-        p = json.load(f)
-    return [re.compile(x) for x in p.get("approve", [])], [re.compile(x) for x in p.get("never", [])]
+    shape = 'a JSON object like {"approve": ["^Bash: git status(\\s|$)"], "never": ["git push"]}: two lists of regular expressions'
+    try:
+        with open(os.path.expanduser(path)) as f:
+            p = json.load(f)
+        if not isinstance(p, dict) or set(p) - {"approve", "never"}:
+            raise ValueError("only the keys approve and never are allowed")
+        lists = []
+        for key in ("approve", "never"):
+            pats = p.get(key, [])
+            if not isinstance(pats, list) or not all(isinstance(x, str) and x for x in pats):
+                raise ValueError(f'"{key}" must be a list of non-empty strings (one regular expression each)')
+            lists.append([re.compile(x) for x in pats])
+        return lists[0], lists[1]
+    except (OSError, ValueError, re.error) as e:
+        die(f"cannot use the policy {path}: {e}. It must be {shape}. Fix the file, or leave out --policy to have nothing answered for you", 2)
 
 
 def parts(text):
@@ -375,7 +388,7 @@ def finish(rex, run):
 def show(run, res):
     """Compact, stable text for the orchestrator: facts first, the worker's words last."""
     print(f"== {run['name']}   state: {res['state']}   {int(time.time() - run['t0'])}s"
-          + ("" if res["state"] == "done" and not run.get("keep") else f"   block: {run['block']}"))
+          + ("" if res["state"] == "done" and not run.get("keep") and not res.get("attention") else f"   block: {run['block']}"))
     if run.get("approved"):
         print(f"auto-approved ({len(run['approved'])}): " + " | ".join(x[:60] for x in run["approved"][-5:]))
     if res["state"] in ("blocked", "error"):
@@ -412,7 +425,7 @@ def collect(rex, policy, timeout, only=None):
             r["state"] = res["state"]
             if res["state"] == "done":
                 res.update(finish(rex, r))
-                if not r.get("keep"):
+                if not r.get("keep") and not res.get("attention"):  # an unclean worker keeps its pane: screen, then send
                     rex.call("block", "close", "-s", rex.session, r["block"], check=False)
             show(r, res)
             if res.get("attention"):
@@ -440,8 +453,9 @@ def cmd_start(rex, a):
 
 
 def cmd_run(rex, a):
+    policy = load_policy(a.policy)  # before a pane exists: a bad policy must not leave a started worker behind
     run = start(rex, a, a.agent_args)
-    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=run["name"]))
+    sys.exit(collect(rex, policy, a.timeout, only=run["name"]))
 
 
 def cmd_collect(rex, a):
@@ -482,11 +496,12 @@ def cmd_send(rex, a):
     guard(a.block)
     state = rex.status(a.block).get("state")
     if state not in ("done", "idle"):
-        die(f"not sent: the worker is {state or 'not reporting'} (a stray Return would answer its dialog)", 6)
+        die(f"not sent: the worker is {state or 'not reporting'}, not at its prompt (a stray Return would answer its dialog). "
+            f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`", 6)
     rex.type(a.block, " ".join(a.text))
     time.sleep(1)  # let the TUI draw the text before Return
     rex.key(a.block, "enter")
-    for r in mine(rex, ("open", "blocked", "timeout", "done")):
+    for r in mine(rex, ("open", "blocked", "timeout", "done", "unclean")):
         if r["block"] == a.block:  # a new turn: collect should wait for it again
             r.update(state="open", t0=time.time(), seen=False)
             ledger_update(r)
@@ -496,9 +511,9 @@ def cmd_approve(rex, a):
     guard(a.block)
     kind, text = question(rex.status(a.block))
     if a.match and not re.search(a.match, text):
-        die(f"the open prompt does not match: {text}", 7)
+        die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", 7)
     if not approve_once(rex, a.block, text):
-        die("no permission prompt open, or not a Claude Code pane", 6)
+        die("no permission prompt open, or not a Claude Code pane. See `rex-crew status` for what the pane is doing", 6)
     print(f"approved once: {text[:200]}")
 
 
@@ -507,13 +522,13 @@ def cmd_answer(rex, a):
     guard(a.block)
     rec = rex.status(a.block)
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
-        die("no question open (for a permission prompt use approve or deny)", 6)
+        die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", 6)
     if a.choice.isdigit():
         rex.type(a.block, a.choice)
     else:
         free = re.search(r"(\d+)\. Type something", rex.screen(a.block, 30))
         if not free:
-            die("this question takes no free text; answer with an option number", 6)
+            die("this question takes no free text; answer with an option number (`rex-crew screen BLOCK` shows them)", 6)
         rex.type(a.block, free.group(1))
         time.sleep(1)
         rex.type(a.block, a.choice)
@@ -528,7 +543,7 @@ def cmd_answer(rex, a):
 def cmd_deny(rex, a):
     guard(a.block)
     if rex.status(a.block).get("state") != "blocked":
-        die("nothing to deny", 6)
+        die("nothing to deny: the worker is not blocked. See `rex-crew status`", 6)
     rex.key(a.block, "escape")
 
 
@@ -545,7 +560,7 @@ def cmd_status(rex, a):
 def cmd_close(rex, a):
     guard(a.block)
     rex.call("block", "close", "-s", rex.session, a.block)
-    for r in mine(rex):
+    for r in mine(rex, LIVE + ("unclean",)):
         if r["block"] == a.block:
             r["state"] = "closed"
             ledger_update(r)
@@ -581,7 +596,9 @@ def main():
     if "--" in argv:
         i = argv.index("--")
         argv, agent_args = argv[:i], argv[i + 1:]
-    p = argparse.ArgumentParser(prog="rex-crew", description=__doc__.split("\n\n")[0])
+    raw = argparse.RawDescriptionHelpFormatter
+    p = argparse.ArgumentParser(prog="rex-crew", description=__doc__.split("\n\n")[0], formatter_class=raw,
+                                epilog="rex-crew selftest   check the policy matcher (needs no Rex)\nrex-crew COMMAND --help   options of one command")
     p.add_argument("-S", "--host", default=os.environ.get("REX_CREW_HOST"), help="Rex host label (default: this machine)")
     p.add_argument("-s", "--session", default=os.environ.get("REX_CREW_SESSION"), help="session id on that host")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -592,24 +609,27 @@ def main():
         q.add_argument("--trust", action="store_true", help="confirm the folder-trust dialog if it names DIR")
         q.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
 
-    r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it")
-    task_args(r); r.add_argument("--policy"); r.add_argument("--timeout", type=int, default=900); r.set_defaults(fn=cmd_run)
-    s = sub.add_parser("start", help="put a task on the host and start a worker; returns at once")
+    claude_args = "usage: rex-crew run NAME DIR TASK [options] -- CLAUDE_ARGS\neverything after a bare -- goes to claude, e.g. -- --permission-mode acceptEdits"
+    r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it", epilog=claude_args, formatter_class=raw)
+    task_args(r); r.add_argument("--policy", help="JSON policy file: {approve: [regex], never: [regex]}; without it nothing is answered for you")
+    r.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3, and `collect` waits again"); r.set_defaults(fn=cmd_run)
+    s = sub.add_parser("start", help="put a task on the host and start a worker; returns at once", epilog=claude_args, formatter_class=raw)
     task_args(s); s.set_defaults(fn=cmd_start)
     c = sub.add_parser("collect", help="wait for the open workers: answer routine prompts, report each as it ends; exit 2 when one needs you")
     c.add_argument("name", nargs="?", help="only this worker"); c.add_argument("--policy", help="JSON: {approve: [regex], never: [regex]}")
-    c.add_argument("--timeout", type=int, default=900); c.set_defaults(fn=cmd_collect)
+    c.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3 and name who is still working"); c.set_defaults(fn=cmd_collect)
     ru = sub.add_parser("runs", help="what was started in this session (ledger), newest last")
-    ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int); ru.set_defaults(fn=cmd_runs)
+    ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int, help="show this many (default 20)"); ru.set_defaults(fn=cmd_runs)
     co = sub.add_parser("checkout", help="git worktree for one worker on its own branch; prints its path")
-    co.add_argument("name"); co.add_argument("repo"); co.add_argument("--base", default="HEAD"); co.add_argument("--branch")
+    co.add_argument("name"); co.add_argument("repo", help="repository on the host; a relative path is relative to the host's directory")
+    co.add_argument("--base", default="HEAD", help="start the branch here (default HEAD)"); co.add_argument("--branch", help="branch name (default crew/NAME)")
     co.add_argument("--copy", action="append", default=[], help="untracked file or folder to copy in (repeatable)"); co.set_defaults(fn=cmd_checkout)
     sh = sub.add_parser("sh", help="run one shell command on the host and print its output")
     sh.add_argument("command", nargs="+"); sh.set_defaults(fn=cmd_sh)
     se = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
     se.add_argument("block"); se.add_argument("text", nargs="+"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
-    ap.add_argument("block"); ap.add_argument("--match", help="only if the prompt matches this regex"); ap.set_defaults(fn=cmd_approve)
+    ap.add_argument("block"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 7)"); ap.set_defaults(fn=cmd_approve)
     an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
     an.add_argument("block"); an.add_argument("choice"); an.set_defaults(fn=cmd_answer)
     dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
@@ -617,7 +637,7 @@ def main():
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)
     sc.set_defaults(fn=lambda rex, a: print(rex.screen(a.block, a.lines)))
     st = sub.add_parser("status", help="every reporting pane in the session: state, label, block, open question")
-    st.add_argument("--all", action="store_true"); st.set_defaults(fn=cmd_status)
+    st.add_argument("--all", action="store_true", help="also panes that report no status"); st.set_defaults(fn=cmd_status)
     cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.set_defaults(fn=cmd_close)
     ss = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)

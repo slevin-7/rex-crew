@@ -12,7 +12,7 @@ rex-crew -S buildbox -s "$SESSION" run fix-retry /Users/me/code/app task.md \
 ```text
 == fix-retry   state: done   184s
 auto-approved (3): Bash: git status | Bash: npm test | Bash: git commit -m ...
-git: 4be2c1a retry: back off on 429 · dirty 0
+git: 4be2c1a retry: back off on 429 · branch main · dirty 0
 verify: exit 0
 report:
 STATUS: done
@@ -80,17 +80,18 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 rex-crew status                      # every reporting pane: state and open question
 ```
 
-Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a symlinked or oversized report, failed verify,
-uncommitted changes), `2` needs you, `3` timeout, `4` error, `5` pane gone.
+Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report whose STATUS is not `done`, a symlinked or
+oversized report, failed verify, uncommitted changes; the pane stays open so you can `screen` and `send`), `2` needs you, `3` timeout
+(`--timeout` seconds, default 900), `4` error, `5` pane gone, `6` unknown NAME. A `--policy` file that is missing or malformed exits `2` before any pane opens.
 `collect` hands back as soon as any worker needs you (whatever the other workers' codes), looks at every worker at least
-once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits 6
+once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits `6`
 for a NAME it has never started. A pane counts as gone only after two failed status calls in a row.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
 ## Policy
 
 ```json
-{ "approve": ["^Bash: (git (status|log|diff|add|commit)|npm test)\\b"],
+{ "approve": ["^Bash: (git (status|log|diff|add|commit)|npm test)(\\s|$)"],
   "never":   ["\\b(rm|sudo|curl)\\b", "git push", "`|\\$\\("] }
 ```
 
