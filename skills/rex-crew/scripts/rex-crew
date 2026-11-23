@@ -32,12 +32,24 @@ If only the user can decide something, ask and wait instead of guessing.
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
+REPORT_MAX = 100000  # bytes of the worker's report that are read back
 EXIT = {"done": 0, "unclean": 1, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}
 
 
 def die(msg, code=1):
     print(f"rex-crew: {msg}", file=sys.stderr)
     sys.exit(code)
+
+
+def jload(text):
+    """The first JSON document that starts a line: rex may print a warning before (or after) its JSON."""
+    dec = json.JSONDecoder()
+    for m in re.finditer(r"^\s*[{\[]", text, re.M):
+        try:
+            return dec.raw_decode(text, m.end() - 1)[0]
+        except ValueError:
+            pass
+    raise ValueError("no JSON in rex output")
 
 
 class Rex:
@@ -55,7 +67,7 @@ class Rex:
         """The worker's own report (OSC 7501), or {} when it has reported nothing."""
         p = self.call("block", "call", "-s", self.session, "-b", block, "program_status", check=False)
         try:
-            recs = json.loads(p.stdout).get("records") or []
+            recs = jload(p.stdout).get("records") or []
         except (ValueError, AttributeError):
             return {"state": "gone"}
         return recs[0] if recs and isinstance(recs[0], dict) else {}
@@ -75,8 +87,8 @@ class Rex:
         p = self.call("run", "-s", self.session, "--label", "crew-sh", "--keep-open", "--focus=false",
                       "--json", "--wait", "--", "sh", "-c", script, check=False)
         try:
-            block = json.loads(p.stdout[: p.stdout.rindex("}") + 1])["block_ids"][0]
-        except (ValueError, KeyError, IndexError):
+            block = jload(p.stdout)["block_ids"][0]
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
             die(f"could not run a command on the host: {p.stderr.strip()[:300] or p.stdout[:300]}")
         out = self.call("capture", "-s", self.session, "-b", block, "--trim", "--unwrap", check=False).stdout
         self.call("block", "close", "-s", self.session, block, check=False)
@@ -297,9 +309,12 @@ def start(rex, a, agent_args):
             busy.remove(r)
     if busy:
         die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
-    task = sys.stdin.read() if a.task == "-" else open(os.path.expanduser(a.task)).read()
-    task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md")
-    b64, d = base64.b64encode(task.encode()).decode(), shlex.quote(a.dir)
+    try:  # bytes, not text: a task that is not UTF-8 or has CRLF line ends must arrive as written
+        task = sys.stdin.buffer.read() if a.task == "-" else open(os.path.expanduser(a.task), "rb").read()
+    except OSError as e:
+        die(f"cannot read the task: {e}", 2)
+    task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md").encode()
+    b64, d = base64.b64encode(task).decode(), shlex.quote(a.dir)
     # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
     # Rex limits one request to 64 KiB, so a long task travels in pieces.
     step = 30000
@@ -307,16 +322,16 @@ def start(rex, a, agent_args):
         pre = (f"mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md .rex-crew/task-{a.name}.b64 && "
                "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; ") if i == 0 else ""
         post = f" && base64 -d < .rex-crew/task-{a.name}.b64 > .rex-crew/task-{a.name}.md && rm .rex-crew/task-{a.name}.b64" if i + step >= len(b64) else ""
-        _, out = rex.sh(f"cd {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
+        _, out = rex.sh(f"cd -- {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
         if "@@PUT ok" not in out:
             die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
     # The prompt goes first: --allowedTools is variadic and would swallow it.
-    line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd " + d
+    line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd -- " + d
             + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
     p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
     run = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "host": rex.host or "", "session": rex.session,
-           "block": json.loads(p.stdout)["block_ids"][0], "verify": a.verify, "trust": a.trust, "keep": a.keep,
+           "block": jload(p.stdout)["block_ids"][0], "verify": a.verify, "trust": a.trust, "keep": a.keep,
            "state": "open", "t0": time.time(), "started": time.strftime("%Y-%m-%d %H:%M")}
     ledger_update(run)
     return run
@@ -325,22 +340,32 @@ def start(rex, a, agent_args):
 def finish(rex, run):
     """What is really on disk: the report file, git, and the verify command's exit status."""
     d, verify, m = shlex.quote(run["dir"]), run.get("verify"), f"@@{os.urandom(6).hex()}"
-    script = (f"cd {d} || exit 97; echo {m}REPORT; base64 < .rex-crew/report-{run['name']}.md 2>/dev/null | tr -d '\\n'; echo; "
+    f = f".rex-crew/report-{run['name']}.md"
+    # A worker controls the report path: never follow a symlink out of the directory, never ship more than REPORT_MAX bytes.
+    rep = (f"if [ -L .rex-crew ] || [ -L {f} ]; then printf @LINK@; elif [ -f {f} ]; then head -c {REPORT_MAX + 1} {f} | base64 | tr -d '\\n'; fi; echo; ")
+    script = (f"cd -- {d} || exit 97; echo {m}REPORT; {rep}"
               f"echo {m}GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"branch $(git branch --show-current 2>/dev/null) · dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-              f"echo {m}VERIFY; " + (f"( {verify} ) >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$; rm -f /tmp/rex-crew-verify.$$; echo {m}RC $rc" if verify else f"echo {m}RC none"))
+              f"echo {m}VERIFY; " + (f"( {verify}\n) </dev/null >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$ | tail -c 4000; rm -f /tmp/rex-crew-verify.$$; echo {m}RC $rc" if verify else f"echo {m}RC none"))
     _, out = rex.sh(script)
     part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
+    notes, raw = [], part(m + "REPORT", m + "GIT")
     try:
-        report = base64.b64decode(re.sub(r"\s", "", part(m + "REPORT", m + "GIT"))).decode("utf-8", "replace").strip()
+        body = b"" if raw == "@LINK@" else base64.b64decode(re.sub(r"\s", "", raw))
     except ValueError:
-        report = ""
+        body = b""
+    if raw == "@LINK@":
+        notes.append("the report path is a symlink: not read")
+    if len(body) > REPORT_MAX:
+        body = body[:REPORT_MAX]
+        notes.append(f"the report is longer than {REPORT_MAX} bytes: cut")
+    report = body.decode("utf-8", "replace").strip()
     rc = re.search(re.escape(m) + r"RC (\S+)", out)
     res = {"report": report, "git": part(m + "GIT", m + "VERIFY"),
            "verify_tail": part(m + "VERIFY", m + "RC") if verify else "", "verify_rc": rc.group(1) if rc else "unknown"}
     # "done" only means the turn ended. Say plainly when the result is not clean.
     said = re.search(r"^STATUS:\s*(\w+)", report, re.M)
-    res["attention"] = [x for x in (
-        None if report else "the worker wrote no report file",
+    res["attention"] = notes + [x for x in (
+        None if report or notes else "the worker wrote no report file",
         None if not said or said.group(1).lower() == "done" else f"the worker reports STATUS {said.group(1)}",
         None if res["verify_rc"] in ("0", "none") else f"verify failed (exit {res['verify_rc']})",
         None if not re.search(r"dirty [1-9]", res["git"]) else "uncommitted changes in the directory") if x]
@@ -432,14 +457,19 @@ def cmd_runs(rex, a):
 
 def cmd_checkout(rex, a):
     """A git worktree per worker, on its own branch, with the generated files it needs copied in."""
-    repo, name = a.repo.rstrip("/"), a.name
-    wt = f"{os.path.dirname(repo)}/.rex-crew-worktrees/{os.path.basename(repo)}/{name}"
-    copies = "".join(f" && cp -R {shlex.quote(repo + '/' + c)} {shlex.quote(wt + '/' + c)}" for c in a.copy)
-    rc, out = rex.sh(f"cd {shlex.quote(repo)} && git worktree add -q -b {shlex.quote(a.branch or 'crew/' + name)} "
-                     f"{shlex.quote(wt)} {shlex.quote(a.base)}{copies} && echo @@WT ok")
-    if "@@WT ok" not in out:
+    name = a.name
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name):
+        die("NAME must be lowercase a-z0-9_- and at most 32 characters", 2)
+    # The host resolves the repo path (a relative one is relative to the host's directory, not ours).
+    copies = "".join(f" && cp -R \"$r\"/{shlex.quote(c)} \"$wt\"/{shlex.quote(c)}" for c in a.copy)
+    rc, out = rex.sh(f"r=$(cd -- {shlex.quote(a.repo)} && pwd) || exit 97; "
+                     f"wt=\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{name}\"; "
+                     f"cd -- \"$r\" && git worktree add -q -b {shlex.quote(a.branch or 'crew/' + name)} "
+                     f"\"$wt\" {shlex.quote(a.base)}{copies} && echo \"@@WT $wt\"")
+    hit = re.search(r"^@@WT (.+)$", out, re.M)
+    if not hit:
         die(f"checkout failed: {out.strip()[-300:]}")
-    print(wt)
+    print(hit.group(1).strip())
 
 
 def cmd_sh(rex, a):
@@ -503,7 +533,7 @@ def cmd_deny(rex, a):
 
 
 def cmd_status(rex, a):
-    blocks = json.loads(rex.call("block", "ls", "-s", rex.session, "--json").stdout)["blocks"]
+    blocks = jload(rex.call("block", "ls", "-s", rex.session, "--json").stdout)["blocks"]
     for b in blocks:
         rec = rex.status(b["block_id"])
         if not rec and not a.all:
@@ -522,9 +552,9 @@ def cmd_close(rex, a):
 
 
 def cmd_session(rex, a):
-    sessions = json.loads(rex.call("ls", "--json").stdout).get("sessions", [])
+    sessions = jload(rex.call("ls", "--json").stdout).get("sessions", [])
     hit = [s["session_id"] for s in sessions if s.get("label") == a.label]
-    print(hit[0] if hit else json.loads(rex.call("new", a.label, "--json").stdout)["session_id"])
+    print(hit[0] if hit else jload(rex.call("new", a.label, "--json").stdout)["session_id"])
 
 
 def selftest():

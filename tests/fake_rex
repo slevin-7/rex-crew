@@ -61,6 +61,8 @@ def main():
     if argv[:1] == ["-S"]:
         argv = argv[2:]
     st, cmd = load(), argv[0] if argv else ""
+    if os.environ.get("FAKE_REX_WARN") and cmd != "capture":  # a flaky host: noise on stdout before the JSON
+        print(os.environ["FAKE_REX_WARN"])
     if cmd == "run":
         rest = argv[1:]
         i = rest.index("--")
