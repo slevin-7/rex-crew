@@ -30,7 +30,7 @@ into dialogs, and guessing whether "done" is true. `rex-crew` folds that into on
 
 - **No bypassed permissions.** Workers run in `acceptEdits` or stricter. A prompt is answered only when a
   policy file you wrote covers it; it is re-read right before the key press and gets a one-time Yes.
-  Everything else comes back to the orchestrator as text, with the block to answer.
+  Everything else comes back to the orchestrator as text, with the block to answer. A prompt without its command text (Rex reports very long commands as just `permission prompt`) is never answered for you; the screen tail comes with it.
 - **Reports, not screens.** Each task gets a report protocol appended. The worker writes `STATUS`, `CHANGED`,
   `VERIFIED`, `COMMIT`, `OPEN`, `NEXT` to a file, and `rex-crew` reads that file from the host.
 - **Facts beside the report.** After the turn, `rex-crew` runs your `--verify` command on the host and reads

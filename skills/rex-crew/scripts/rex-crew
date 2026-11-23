@@ -80,10 +80,22 @@ class Rex:
         self.call("send-key", "-s", self.session, "-b", block, key)
 
     def type(self, block, text):
-        self.call("send", "-s", self.session, "-b", block, text)
+        # One Rex control request is limited to 65536 bytes: a long text travels in pieces.
+        raw, i = text.encode(), 0
+        while True:
+            j = min(i + 30000, len(raw))
+            while j < len(raw) and (raw[j] & 0xC0) == 0x80:  # never cut inside a UTF-8 character
+                j -= 1
+            self.call("send", "-s", self.session, "-b", block, raw[i:j].decode())
+            i = j
+            if i >= len(raw):
+                return
 
     def sh(self, script):
         """Run a shell script on the host in a throwaway tab; return (exit status, output)."""
+        if len(script.encode()) > 60000:  # one Rex control request is limited to 65536 bytes
+            die("that command is too long for the host: one Rex control request is limited to 65536 bytes. "
+                "Put it in a file in the directory and run the file", 2)
         p = self.call("run", "-s", self.session, "--label", "crew-sh", "--keep-open", "--focus=false",
                       "--json", "--wait", "--", "sh", "-c", script, check=False)
         try:
@@ -183,6 +195,12 @@ def question(rec):
     msg, kind = str(rec.get("msg") or ""), str(rec.get("kind") or "")  # the record comes from the worker's terminal
     # Only an "approve" before the first colon is the dialog's own prefix; one inside `Bash: ...` belongs to the command.
     m = re.match(r"[^:]*?\bapprove (.*)", msg, re.S)
+    if not m:
+        # A hook failure comes first and has colons of its own: `PreToolUse hook failed: ... · approve Bash: ls`.
+        # The dialog's own prefix is the one `· approve `. Two of them (a hook text can echo a command) are
+        # ambiguous: keep the whole message, which no pattern approves.
+        marks = list(re.finditer(r"(?:^|·\s*)approve (?=\S)", msg))
+        m = re.match(r"(.*)", msg[marks[0].end():], re.S) if len(marks) == 1 else None
     return kind, m.group(1) if m else msg
 
 
@@ -329,7 +347,9 @@ def trust(rex, run):
         return True  # we pressed a moment ago; give the dialog time to close instead of pressing again
     squash = lambda t: re.sub(r"\s", "", t)
     scr = rex.screen(run["block"], 16)
-    if not (run.get("trust") and "trust" in scr.lower() and squash(run["dir"].rstrip("/")) in squash(scr)):
+    # Claude Code names the physical directory (the symlink resolved), the task gave the path it was started with.
+    names = [squash(x.rstrip("/")) for x in (run["dir"], run.get("real")) if x]
+    if not (run.get("trust") and "trust" in scr.lower() and any(n in squash(scr) for n in names)):
         return False
     rex.key(run["block"], "down")  # the default is "No, exit"
     time.sleep(1)
@@ -367,6 +387,10 @@ def tick(rex, run, policy):
         if "trust this folder" in text.lower():  # reported as a permission prompt by newer Claude Code
             return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
         run["seen"] = True
+        if kind == "permission" and not re.match(r"[\w.\-]+: \S", text):
+            # A very long command is reported as just `permission prompt`: nothing to match, so never routine.
+            # Give the orchestrator the screen, so it can decide without a second call.
+            return {"state": "blocked", "kind": kind, "question": f"{text}\nthe worker's screen:\n{rex.screen(run['block'], 20)}"}
         if kind == "permission" and routine(text, approve, never):
             last, n, at = run.get("press") or ["", 0, 0]
             n, at = (n, at) if last == text else (0, 0)
@@ -683,7 +707,7 @@ def cmd_answer(rex, a):
     rec = rex.status(a.block)
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
         die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", 6)
-    if a.choice.isdigit():
+    if re.fullmatch(r"[0-9]+", a.choice):
         rex.type(a.block, a.choice)
     else:
         free = re.search(r"(\d+)\. Type something", rex.screen(a.block, 30))

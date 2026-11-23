@@ -1,7 +1,7 @@
 {
   "approve": [
-    "^Bash: (rtk )?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail|sort|uniq)(\\s|$)",
-    "^Bash: (rtk )?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))(\\s|$)"
+    "^Bash: (rtk (proxy )?)?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail|sort|uniq)(\\s|$)",
+    "^Bash: (rtk (proxy )?)?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))(\\s|$)"
   ],
   "never": [
     "^Bash: (\\S+=\\S* )*(rtk (proxy )?)?(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)(\\s|$)",
