@@ -97,7 +97,7 @@ rex-crew status                      # every reporting pane: state and open ques
 ```
 
 `integrate` merges `crew/api`, `crew/docs` into the branch REPO has checked out, one at a time, and prints per branch `merged`, `conflict:` with the
-files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (the worker committed nothing). It stops at the first conflict or
+files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (already merged, or the worker committed nothing). It stops at the first conflict or
 failed verify with a clean tree (exit 1) and refuses up front (exit 2) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
 `skills/rex-crew/SKILL.md` has the details.
 

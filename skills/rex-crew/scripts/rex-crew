@@ -232,6 +232,8 @@ def guard(block):
 def question(rec):
     """`permission approve Bash: git status` -> ('permission', 'Bash: git status')."""
     msg, kind = str(rec.get("msg") or ""), str(rec.get("kind") or "")  # the record comes from the worker's terminal
+    if kind == "question":  # the worker's own words: nothing in them is a dialog prefix
+        return kind, msg
     # Only an "approve" before the first colon is the dialog's own prefix; one inside `Bash: ...` belongs to the command.
     m = re.match(r"[^:]*?\bapprove (.*)", msg, re.S)
     if not m:
@@ -1012,10 +1014,12 @@ def cmd_integrate(rex, a):
             f"sha=$(git rev-parse --verify -q refs/heads/{br}) || {{ echo {m}GONE; exit 0; }}; "
             f"wtp=$(git worktree list --porcelain | awk -v b=refs/heads/{br} '/^worktree /{{p=substr($0,10)}} $1==\"branch\" && $2==b {{print p}}'); "
             f"if [ -n \"$wtp\" ]; then echo {m}WTDIRTY $(git -C \"$wtp\" status --porcelain 2>/dev/null | wc -l | tr -d ' '); fi; "
+            f"am=0; if git merge-base --is-ancestor \"$sha\" HEAD && git rev-list --parents --merges HEAD | "
+            f"awk -v s=\"$sha\" '{{for(i=3;i<=NF;i++) if($i==s) f=1}} END{{exit !f}}'; then am=1; fi; "
             f"mo=$(git merge --no-ff --no-edit -m \"Merge branch '{br}'\" \"$sha\" 2>&1); mrc=$?; "
             f"if [ $mrc -ne 0 ]; then echo {m}CONFLICT; git -c core.quotepath=false diff --name-only --diff-filter=U | head -n 30; echo {m}NCONF $(git diff --name-only --diff-filter=U | wc -l | tr -d ' '); echo {m}MSG; printf '%s\\n' \"$mo\" | tail -n 5; "
             f"git merge --abort >/dev/null 2>&1; if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then git reset -q --hard \"$before\"; fi; "
-            f"elif [ \"$(git rev-parse HEAD)\" = \"$before\" ]; then echo {m}EMPTY; else echo {m}MERGED; {ver}fi; "
+            f"elif [ \"$(git rev-parse HEAD)\" = \"$before\" ]; then echo {m}EMPTY $am; else echo {m}MERGED; {ver}fi; "
             f"echo {m}STATE $(git status --porcelain --untracked-files=all | wc -l | tr -d ' ') $(git rev-parse --short HEAD); echo {m}END")
         end = re.search("^" + re.escape(m) + r"STATE (\d+) (\S+)$", out, re.M)
         part = lambda x, y: out.split(m + x, 1)[1].split(m + y, 1)[0].strip("\n") if m + x in out else ""
@@ -1038,6 +1042,9 @@ def cmd_integrate(rex, a):
             else:
                 print(f"{br}: merge failed: " + " ".join(part("MSG", "STATE").split()[-30:]) + note)
             stopped = (br, 1, end)
+        elif re.search("^" + re.escape(m) + r"EMPTY 1$", out, re.M):
+            print(f"{br}: nothing to merge: already merged into the current branch{note}")
+            empty.append(br)
         elif m + "EMPTY" in out:
             print(f"{br}: nothing to merge: no commits that the current branch lacks; did the worker commit?{note}")
             empty.append(br)
