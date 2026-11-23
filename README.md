@@ -71,13 +71,15 @@ rex-crew collect --policy policy.json   # reports each worker as it ends; exits 
 
 rex-crew approve BLOCK --match RE    # one-time Yes to the open prompt
 rex-crew deny BLOCK
+rex-crew answer BLOCK 2              # answer a worker's own question: option number or free text
 rex-crew send BLOCK "text"           # refused unless the worker is at its prompt
 rex-crew sh 'git -C /abs/repo log --oneline -3'   # any shell command on the host
 rex-crew runs                        # ledger of started workers, kept on disk across conversations
 rex-crew status                      # every reporting pane: state and open question
 ```
 
-Exit status of `run` and `collect`: `0` done, `2` needs you, `3` timeout, `4` error, `5` pane gone.
+Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, failed verify,
+uncommitted changes), `2` needs you, `3` timeout, `4` error, `5` pane gone.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
 ## Policy

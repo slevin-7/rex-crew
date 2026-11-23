@@ -220,11 +220,15 @@ def start(rex, a, agent_args):
     task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md")
     b64, d = base64.b64encode(task.encode()).decode(), shlex.quote(a.dir)
     # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
-    _, out = rex.sh(f"cd {d} || exit 97; mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md && "
-                    f"echo {b64} | base64 -d > .rex-crew/task-{a.name}.md && "
-                    "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; echo @@PUT ok")
-    if "@@PUT ok" not in out:
-        die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
+    # Rex limits one request to 64 KiB, so a long task travels in pieces.
+    step = 30000
+    for i in range(0, len(b64), step):
+        pre = (f"mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md .rex-crew/task-{a.name}.b64 && "
+               "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; ") if i == 0 else ""
+        post = f" && base64 -d < .rex-crew/task-{a.name}.b64 > .rex-crew/task-{a.name}.md && rm .rex-crew/task-{a.name}.b64" if i + step >= len(b64) else ""
+        _, out = rex.sh(f"cd {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
+        if "@@PUT ok" not in out:
+            die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
     # The prompt goes first: --allowedTools is variadic and would swallow it.
     line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd " + d
@@ -379,6 +383,29 @@ def cmd_approve(rex, a):
     print(f"approved once: {text[:200]}")
 
 
+def cmd_answer(rex, a):
+    """Answer a worker's question: pick a numbered option, or type free text into its last option."""
+    guard(a.block)
+    rec = rex.status(a.block)
+    if rec.get("state") != "blocked" or rec.get("kind") != "question":
+        die("no question open (for a permission prompt use approve or deny)", 6)
+    if a.choice.isdigit():
+        rex.type(a.block, a.choice)
+    else:
+        free = re.search(r"(\d+)\. Type something", rex.screen(a.block, 30))
+        if not free:
+            die("this question takes no free text; answer with an option number", 6)
+        rex.type(a.block, free.group(1))
+        time.sleep(1)
+        rex.type(a.block, a.choice)
+        time.sleep(1)
+        rex.key(a.block, "enter")
+    for r in mine(rex):
+        if r["block"] == a.block:
+            r.update(state="open", t0=time.time())
+            ledger_update(r)
+
+
 def cmd_deny(rex, a):
     guard(a.block)
     if rex.status(a.block).get("state") != "blocked":
@@ -464,6 +491,8 @@ def main():
     se.add_argument("block"); se.add_argument("text", nargs="+"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
     ap.add_argument("block"); ap.add_argument("--match", help="only if the prompt matches this regex"); ap.set_defaults(fn=cmd_approve)
+    an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
+    an.add_argument("block"); an.add_argument("choice"); an.set_defaults(fn=cmd_answer)
     dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
     sc = sub.add_parser("screen", help="the last visible lines of a worker's pane")
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)

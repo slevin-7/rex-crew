@@ -40,7 +40,8 @@ NEXT: surface the retry count in the logs
 
 | Exit | State | What to do |
 |---|---|---|
-| 0 | `done` | Read `verify` and `git` before the report: the worker's words are not proof. |
+| 0 | `done` | Clean: report written, verify passed, tree committed. Still read `verify` and `git` before the report. |
+| 1 | `unclean` | The turn ended, but an `ATTENTION:` line says what is wrong. |
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
 | 3 | `timeout` | Still working. `collect` waits again. |
 | 4 | `error` | The worker reported an error; `screen BLOCK` shows it. |
@@ -94,6 +95,26 @@ A prompt is answered for you only if an `approve` pattern matches and no `never`
 answered for you (`2>&1` and `>/dev/null` do not count). It is re-read
 immediately before the key is pressed, and the answer is always the one-time Yes, never "always".
 Without `--policy`, nothing is answered for you. Start from `policy.example.json` and keep the list short.
+
+Two limits to know. Read-only patterns such as `cat` or `grep` approve reading anywhere the worker's user can read,
+so keep secret locations in `never`, as the example does. And `acceptEdits` lets Claude Code create, move and delete
+files inside `DIR` without asking at all; start a worker with `-- --permission-mode default` when every write should
+pass through your policy (`"^(Write|Edit): /abs/dir/"`).
+
+## A worker's own questions
+
+```sh
+"$here/rex-crew" answer BLOCK 2                    # pick option 2 of the question it asked
+"$here/rex-crew" answer BLOCK "Use the staging DB"  # or type a free-text answer
+```
+
+Then `collect` again. `needs you (question): ...` shows the question and its options.
+
+## What "done" means
+
+`state: done` says the worker's turn ended. `ATTENTION:` lines say when that is not a clean result: no report file,
+a report whose STATUS is not `done`, a failed verify command, or uncommitted changes. Any of them makes `collect`
+exit 1, so never read a worker's summary without the lines above it.
 
 ## Other commands
 
