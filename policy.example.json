@@ -4,7 +4,7 @@
     "^Bash: (rtk )?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))(\\s|$)"
   ],
   "never": [
-    "\\b(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)\\b",
+    "^Bash: (\\S+=\\S* )*(rtk (proxy )?)?(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)(\\s|$)",
     "git (push|reset|clean|checkout|rebase|stash|config|remote)",
     "`|\\$\\(",
     "(^|[/~ ])(\\.ssh|\\.aws|\\.gnupg|\\.netrc|\\.env\\b|\\.config/gh|Keychains)|id_(rsa|ed25519)|credentials|secrets?\\b|/etc/",

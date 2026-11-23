@@ -623,7 +623,7 @@ def cmd_checkout(rex, a):
     rc, out = rex.sh(f"r=$(cd -- {shlex.quote(a.repo)} && pwd) || exit 97; "
                      f"wt=\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{name}\"; "
                      f"if [ -e \"$wt\" ]; then echo \"@@EXISTS $wt\"; exit 3; fi; "
-                     f"cd -- \"$r\" && git worktree add -q -b {br} \"$wt\" {shlex.quote(a.base)} && "
+                     f"cd -- \"$r\" && LC_ALL=C git worktree add -q -b {br} \"$wt\" {shlex.quote(a.base)} && "
                      f"{{{copies} :; }} || {{ if [ -d \"$wt\" ]; then echo @@COPYFAIL; git worktree remove --force \"$wt\" >/dev/null 2>&1; "
                      f"rm -rf \"$wt\"; git worktree prune; git branch -D {br} >/dev/null 2>&1; fi; exit 1; }}; echo \"@@WT $wt\"")
     hit = re.search(r"^@@WT (.+)$", out, re.M)
