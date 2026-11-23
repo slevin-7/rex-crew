@@ -69,7 +69,8 @@ A JSON file with two lists of regular expressions, matched against the prompt te
 ```
 
 A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. A chained command
-(`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. It is re-read
+(`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. A command that redirects output into a file is never
+answered for you (`2>&1` and `>/dev/null` do not count). It is re-read
 immediately before the key is pressed, and the answer is always the one-time Yes, never "always".
 Without `--policy`, nothing is answered for you. Start from `policy.example.json` and keep the list short.
 

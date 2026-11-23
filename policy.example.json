@@ -6,7 +6,6 @@
   "never": [
     "\\b(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)\\b",
     "git (push|reset|clean|checkout|rebase|stash|config|remote)",
-    "`|\\$\\(",
-    "(?<![0-9&])>(?!&)"
+    "`|\\$\\("
   ]
 }
