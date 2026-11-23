@@ -69,6 +69,10 @@ A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on bra
 rex-crew start api "$A" api.md --verify 'npm test' --trust -- --permission-mode acceptEdits
 rex-crew collect --policy policy.json   # reports each worker as it ends; exits 2 when one needs you
 
+# or from one plan file: all checkouts and workers, or nothing; then merge the branches back
+rex-crew fanout plan.json
+rex-crew integrate /abs/repo api docs --verify 'npm test' [--verify-timeout SEC]
+
 rex-crew approve BLOCK --match RE    # one-time Yes to the open prompt
 rex-crew deny BLOCK
 rex-crew answer BLOCK 2              # answer a worker's own question: option number or free text
@@ -81,6 +85,21 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 # within REX_CREW_TIMEOUT seconds (default 120) stops with an error naming the host, and a `start` that failed half way closes its pane; a state path that cannot be written stops `start` before any pane opens.
 rex-crew status                      # every reporting pane: state and open question
 ```
+
+`fanout` reads a plan like this; it refuses the whole plan (exit 2) before creating anything if a name, path, task or option is invalid
+(including a misspelled key), and removes what it created if a later step fails:
+
+```jsonc
+{ "repo": "/abs/repo", "base": "main", "copy": [".env.example"],
+  "claude_args": ["--permission-mode", "acceptEdits"], "verify": "npm test", "trust": true,
+  "workers": [ { "name": "api", "task_file": "api.md" },
+               { "name": "docs", "task": "Document the /v2 endpoints in docs/api.md. Do not touch src/." } ] }
+```
+
+`integrate` merges `crew/api`, `crew/docs` into the branch REPO has checked out, one at a time, and prints per branch `merged`, `conflict:` with the
+files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (the worker committed nothing). It stops at the first conflict or
+failed verify with a clean tree (exit 1) and refuses up front (exit 2) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
+`skills/rex-crew/SKILL.md` has the details.
 
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or
 oversized report, failed or hung verify, uncommitted changes, host output cut; the pane stays open so you can `screen` and `send`), `2` needs you,

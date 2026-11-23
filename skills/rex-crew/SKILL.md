@@ -67,8 +67,44 @@ Before handing back it presses routine keys for the other workers for up to abou
 answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again. A Rex host that does not answer one call within `REX_CREW_TIMEOUT` seconds (default 120) is an error that names the host, not a hang. Text for `send` and `sh` may start with a dash (`send BLOCK -1`). A worker whose first status is `done` is collected after two looks, and two `collect` processes report a worker only once.
 An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
 `checkout` accepts a relative repo path (resolved on the host); NAME follows the same rules as for `start`. `checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
-Integrate afterwards yourself, one branch at a time: `"$here/rex-crew" sh 'git -C /abs/repo merge --no-ff crew/api'`,
-then verify the merged result; parallel workers do not know about each other's changes.
+Parallel workers do not know about each other's changes: merge them with `integrate` (below) and verify the merged result.
+
+### Fan out from one plan, integrate afterwards
+
+`fanout PLAN.json` does the `checkout` and `start` of every worker in one call, all or nothing. `integrate REPO NAME...` merges the
+workers' branches `crew/NAME` into the branch that REPO has checked out.
+
+```jsonc
+{ "repo": "/abs/repo", "base": "main", "copy": [".env.example"],
+  "claude_args": ["--permission-mode", "acceptEdits"], "verify": "npm test", "trust": true,
+  "workers": [ { "name": "api",  "task_file": "api.md" },
+               { "name": "docs", "task": "Document the new /v2 endpoints in docs/api.md. Do not touch src/." } ] }
+```
+
+```sh
+"$here/rex-crew" fanout plan.json                  # prints one "started" line per worker; exit 2 = plan refused, nothing created
+"$here/rex-crew" collect --policy policy.json      # as above; every worker must have COMMITTED its work
+"$here/rex-crew" integrate /abs/repo api docs --verify 'npm test'
+```
+
+```text
+crew/api: merged (verify ok)
+crew/docs: conflict: docs/api.md, README.md
+stopped at crew/docs; the tree is clean at 4be2c1a
+```
+
+Plan keys: `repo` (required), `base` (default HEAD), `copy`, `claude_args`, `verify`, `verify_timeout`, `trust`, `workers`. A worker has
+`name` plus exactly one of `task_file` (relative to the plan file) or `task`. A misspelled key, a bad or repeated NAME, an unreadable or empty task,
+a `copy` path that is absolute, uses `..` or does not exist, an empty `verify`, a base that is not a commit, an existing branch or checkout of that name,
+or a live worker of the same name refuses the whole plan (exit 2) before anything is created. If a later step fails (or you press Ctrl-C), the panes are
+closed and the worktrees and branches that this call made are removed again; ones it did not make are never touched.
+
+`integrate` first refuses (exit 2, nothing merged) if the tree of REPO has any change or untracked file, HEAD is detached, a merge or rebase is
+under way, a branch is missing, listed twice or is the current branch. Then, per branch, in the order given: `merged`; `conflict: FILES` (the merge is
+aborted); `merge failed: MESSAGE` (for example unrelated histories); `verify failed (exit N)` or `verify did not finish within Ns` (`--verify-timeout`, default 600;
+that merge is undone and files the verify left behind are removed); `nothing to merge` (the branch has no commit the current one lacks: the worker did not commit;
+the run goes on but exits 1). At the first conflict or failed verify it stops, prints the rest as `not attempted`, leaves the tree clean and exits 1.
+A worker's uncommitted changes are not in its branch: `integrate` warns when a branch's checkout has some. Run `integrate` on the host's REPO only when nobody else is using its working tree.
 
 `"$here/rex-crew" runs` lists what was started in this session, with state and block. It is kept on disk, so a new
 conversation can pick up open workers: read it first when you resume orchestration.
@@ -140,7 +176,7 @@ exit 1, so never read a worker's summary without the lines above it.
    cannot see your conversation.
 2. **Read facts before prose.** `verify` and `git` come from the host, the report from the worker.
 3. **Never pass `--dangerously-skip-permissions` or `bypassPermissions`.** Use `acceptEdits` plus a policy.
-4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; a worker in state `error` still holds its directory until it is closed or its pane is really gone, and `close` marks it closed; two simultaneous `start`s cannot both win). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch so you can retry. `sh` says on stderr when the host's terminal cut the start of the output. Give parallel workers their own checkout or worktree, and copy
+4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; a worker in state `error` still holds its directory until it is closed or its pane is really gone, and `close` marks it closed; two simultaneous `start`s cannot both win). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch so you can retry. `sh` says on stderr when the host's terminal cut the start of the output. Give parallel workers their own checkout or worktree (`fanout` does it), and copy
    generated files they need (project files, `.env.example`) into it first.
 5. **Paths are the host's, and absolute.** `$HOME` and `~` are not expanded in `DIR`.
 6. **Never type into your own pane.** `send`, `approve`, `deny` and `close` refuse `$REX_BLOCK`.
