@@ -97,7 +97,7 @@ class Rex:
 
 # ---- ledger: what was started, so a later call (or a later session) can pick it up -----------------
 
-LIVE = ("open", "blocked", "timeout")
+LIVE = ("open", "blocked", "timeout", "error")  # error: the pane is still there and may recover
 LEDGER_KEYS = ("id", "name", "block", "state")
 
 
@@ -398,7 +398,8 @@ def start(rex, a, agent_args):
     real = hit.group(1) if hit else a.dir
     same = lambda r: r["dir"].rstrip("/") == a.dir.rstrip("/") or r.get("real", r["dir"]).rstrip("/") == real.rstrip("/")
     for r in [r for r in mine(rex) if same(r)]:
-        if rex.status(r["block"]).get("state") == "gone":  # its pane is closed: it cannot hold the directory
+        # its pane is closed: it cannot hold the directory. One failed status call is not proof (tick asks twice too).
+        if rex.status(r["block"]).get("state") == "gone" and rex.status(r["block"]).get("state") == "gone":
             r["state"] = "gone"
             ledger_update(r)
     # Check and claim under one lock: two starts at the same moment must not both pass. A claim that never
@@ -512,9 +513,9 @@ def show(run, res):
         print("report:\n" + (res["report"] or "(none)"))
 
 
-def collect(rex, policy, timeout, only=None):
+def collect(rex, policy, timeout, only=None, rid=None):
     """Watch every open worker of this session. Returns when all are done, or one needs a person."""
-    runs = [r for r in mine(rex, ("open", "blocked", "timeout", "error")) if not only or r["name"] == only]
+    runs = [r for r in mine(rex) if (not only or r["name"] == only) and (not rid or r["id"] == rid)]
     if not runs:
         known = [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session and r["name"] == only]
         if only and not known:
@@ -597,7 +598,7 @@ def cmd_start(rex, a):
 def cmd_run(rex, a):
     policy = load_policy(a.policy)  # before a pane exists: a bad policy must not leave a started worker behind
     run = start(rex, a, a.agent_args)
-    sys.exit(collect(rex, policy, a.timeout, only=run["name"]))
+    sys.exit(collect(rex, policy, a.timeout, only=run["name"], rid=run["id"]))
 
 
 def cmd_collect(rex, a):
