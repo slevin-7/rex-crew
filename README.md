@@ -80,6 +80,9 @@ rex-crew status                      # every reporting pane: state and open ques
 
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, failed verify,
 uncommitted changes), `2` needs you, `3` timeout, `4` error, `5` pane gone.
+`collect` hands back as soon as any worker needs you (whatever the other workers' codes), looks at every worker at least
+once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits 6
+for a NAME it has never started. A pane counts as gone only after two failed status calls in a row.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
 ## Policy
