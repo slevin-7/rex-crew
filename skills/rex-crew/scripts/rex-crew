@@ -6,7 +6,7 @@ status, answers routine permission prompts from a policy file, hands every other
 you, and returns each worker's written report plus what is actually on disk (git, a verify command).
 `run` is both for a single task. Standard library only. See README.md.
 """
-import argparse, base64, contextlib, json, os, re, shlex, subprocess, sys, tempfile, time
+import argparse, base64, contextlib, json, os, posixpath, re, shlex, subprocess, sys, tempfile, time
 try:
     import fcntl
 except ImportError:  # no flock on this platform: updates are still atomic, just not serialized
@@ -176,15 +176,87 @@ def guard(block):
 def question(rec):
     """`permission approve Bash: git status` -> ('permission', 'Bash: git status')."""
     msg, kind = str(rec.get("msg") or ""), str(rec.get("kind") or "")  # the record comes from the worker's terminal
-    return kind, msg.split("approve ", 1)[-1] if "approve " in msg else msg
+    # Only an "approve" before the first colon is the dialog's own prefix; one inside `Bash: ...` belongs to the command.
+    m = re.match(r"[^:]*?\bapprove (.*)", msg, re.S)
+    return kind, m.group(1) if m else msg
 
 
 def load_policy(path):
+    """A clear error (exit 2) for a policy that is missing, unreadable, not JSON, of the wrong shape or has a bad pattern."""
     if not path:
         return [], []
-    with open(os.path.expanduser(path)) as f:
-        p = json.load(f)
-    return [re.compile(x) for x in p.get("approve", [])], [re.compile(x) for x in p.get("never", [])]
+    try:
+        with open(os.path.expanduser(path), encoding="utf-8") as f:
+            p = json.load(f)
+    except (OSError, ValueError) as e:  # ValueError covers bad JSON and bad UTF-8
+        die(f"cannot read the policy {path}: {e}", 2)
+    if not isinstance(p, dict):
+        die(f"the policy {path} must be a JSON object like {{\"approve\": [...], \"never\": [...]}}", 2)
+    out = []
+    for key in ("approve", "never"):
+        pats = p.get(key, [])
+        if not isinstance(pats, list) or not all(isinstance(x, str) for x in pats):
+            die(f"the policy {path}: \"{key}\" must be a list of regular-expression strings", 2)
+        try:
+            out.append([re.compile(x) for x in pats])
+        except re.error as e:
+            bad = next(x for x in pats if not _compiles(x))
+            die(f"the policy {path}: invalid {key} pattern {bad!r}: {e}", 2)
+    return out[0], out[1]
+
+
+def _compiles(x):
+    try:
+        re.compile(x)
+        return True
+    except re.error:
+        return False
+
+
+def opaque(body):
+    """True if the shell could turn this Bash text into a path no pattern has seen: $VAR, ${...}, brace lists, or a
+    glob in a hidden (.x*) or directory segment (/e?c/, ~/.s?h/). Quoted text and a glob in the last segment are fine."""
+    word, quote, i, n = [], None, 0, len(body)  # word: (char, is_glob) pairs
+    def hit():
+        segs, cur = [], []
+        for ch, g in word:
+            if ch == "/" and not g:
+                segs.append(cur); cur = []
+            else:
+                cur.append((ch, g))
+        segs.append(cur)
+        for k, seg in enumerate(segs):
+            if any(g for _, g in seg) and (k < len(segs) - 1 or (seg and seg[0] == (".", False))):
+                return True
+        txt = "".join(c for c, _ in word)
+        return any(c == "{" and not g for c, g in word) and ("," in txt or ".." in txt)
+    while i < n:
+        c = body[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+            else:
+                word.append((c, False))
+        elif c == "\\" and i + 1 < n:
+            i += 1
+            word.append((body[i], False))
+        elif c == "$" and body[i + 1:i + 2] and (body[i + 1].isalnum() or body[i + 1] in "_{@*#?!$-"):
+            return True
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            else:
+                word.append((c, False))
+        elif c in "'\"":
+            quote = c
+        elif c.isspace() or c in ";&|<>":
+            if hit():
+                return True
+            word = []
+        else:
+            word.append((c, c in "*?["))
+        i += 1
+    return hit()
 
 
 def parts(text):
@@ -223,7 +295,19 @@ def routine(text, approve, never):
     # Command substitution runs something no pattern has seen, so it is never routine.
     if "`" in text or "$(" in text or any(r.search(p) for r in never for p in ps):
         return False
-    return "Bash: <redirection>" not in ps and all(any(r.search(p) for r in approve) for p in ps)
+    tool, _, body = text.partition(": ")
+    if tool == "Bash":
+        # `cd /etc` then a relative `cat hosts`: the directory itself must pass `never` as a directory.
+        if opaque(body) or any(r.search(p + "/") for r in never for p in ps if re.match(r"Bash: (cd|pushd)(\s|$)", p)):
+            return False
+    else:
+        # A path prefix pattern must not be walked out of: `..` components, or a second line, are never routine.
+        if ".." in body.split("/") or "\n" in body or "\r" in body or "\0" in body:
+            return False
+        if body.startswith("/") and any(r.search(f"{tool}: {posixpath.normpath(body)}") for r in never):
+            return False
+    # Anchored at the start: an unanchored pattern must not approve a command that merely mentions it later.
+    return "Bash: <redirection>" not in ps and all(any(r.match(p) for r in approve) for p in ps)
 
 
 def approve_once(rex, block, expect):
@@ -440,8 +524,9 @@ def cmd_start(rex, a):
 
 
 def cmd_run(rex, a):
+    policy = load_policy(a.policy)  # a broken policy must stop us before a worker exists
     run = start(rex, a, a.agent_args)
-    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=run["name"]))
+    sys.exit(collect(rex, policy, a.timeout, only=run["name"]))
 
 
 def cmd_collect(rex, a):
