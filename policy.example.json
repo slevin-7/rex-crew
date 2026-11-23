@@ -1,12 +1,15 @@
 {
   "approve": [
-    "^Bash: (rtk )?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail|sort|uniq)\\b",
-    "^Bash: (rtk )?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))\\b"
+    "^Bash: (rtk )?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail|sort|uniq)(\\s|$)",
+    "^Bash: (rtk )?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))(\\s|$)"
   ],
   "never": [
     "\\b(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)\\b",
     "git (push|reset|clean|checkout|rebase|stash|config|remote)",
     "`|\\$\\(",
-    "(^|[/~ ])(\\.ssh|\\.aws|\\.gnupg|\\.netrc|\\.env\\b|\\.config/gh|Keychains)|id_(rsa|ed25519)|credentials|secrets?\\b|/etc/"
+    "(^|[/~ ])(\\.ssh|\\.aws|\\.gnupg|\\.netrc|\\.env\\b|\\.config/gh|Keychains)|id_(rsa|ed25519)|credentials|secrets?\\b|/etc/",
+    "\\s--(ou|out|outp|outpu|output|pre|pre-glob|ext\\S*|textc\\S*|open-files-in-pager|compress-program)(=|\\s|$)",
+    "\\bsort\\b[^|;&]*\\s-[A-Za-z]*o",
+    "\\buniq\\b(\\s+-\\S+)*\\s+[^\\s|;&]+\\s+[^\\s|;&]+"
   ]
 }

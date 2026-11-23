@@ -129,14 +129,17 @@ def parts(text):
         return [text]
     try:
         # 2>&1 and >/dev/null change nothing on disk; every other redirection is a write and is never routine.
-        body = re.sub(r"\d?>&\d|\d?>\s*/dev/null", "", body)
-        lex = shlex.shlex(body, posix=True, punctuation_chars=";&|<>")
+        # Only when nothing is glued to them: `>&2file` and `> /dev/nullx` are writes to a file.
+        body = re.sub(r"(?<!&)\d?>&\d(?![^\s;&|])|(?<!>)\d?>\s*/dev/null(?![^\s;&|])", "", body)
+        # Newline and CR end a command like `;` does, and a `#` comment must not swallow the next line.
+        lex = shlex.shlex(body, posix=True, punctuation_chars=";&|<>\r\n")
+        lex.whitespace, lex.commenters = " \t", ""
         lex.whitespace_split = True
         out, cur = [], []
         for tok in lex:
-            if tok and set(tok) <= set("<>"):
-                return ["Bash: <redirection>"]
-            if tok and set(tok) <= set(";&|"):
+            if tok and set(tok) <= set(";&|<>\r\n") and set(tok) & set("<>"):
+                return ["Bash: <redirection>"]  # also `&>`, `>&`, `|&>`, `<(`
+            if tok and set(tok) <= set(";&|\r\n"):
                 out.append(cur); cur = []
             else:
                 cur.append(tok)
@@ -151,6 +154,10 @@ def routine(text, approve, never):
     if not text or any(r.search(text) for r in never):
         return False
     ps = parts(text)
+    # `never` also sees the command as the shell will read it: `~/.s''sh` is `~/.ssh`.
+    # Command substitution runs something no pattern has seen, so it is never routine.
+    if "`" in text or "$(" in text or any(r.search(p) for r in never for p in ps):
+        return False
     return "Bash: <redirection>" not in ps and all(any(r.search(p) for r in approve) for p in ps)
 
 
