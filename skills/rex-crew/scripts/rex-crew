@@ -41,6 +41,14 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+def rpc_timeout():
+    """Seconds one rex call may take (REX_CREW_TIMEOUT, default 120)."""
+    try:
+        return max(0.1, float(os.environ.get("REX_CREW_TIMEOUT") or 120))
+    except ValueError:
+        return 120.0
+
+
 def jload(text):
     """The first JSON document that starts a line: rex may print a warning before (or after) its JSON."""
     dec = json.JSONDecoder()
@@ -56,9 +64,15 @@ class Rex:
     def __init__(self, host, session):
         self.host, self.session = host, session
 
-    def call(self, *args, check=True):
+    def call(self, *args, check=True, wait=None):
+        """One rex call, bounded: a host that stops answering is an error that names it, not a hang forever."""
         cmd = ["rex"] + (["-S", self.host] if self.host else []) + list(args)
-        p = subprocess.run(cmd, capture_output=True, text=True)
+        limit = wait or rpc_timeout()
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+        except subprocess.TimeoutExpired:
+            die(f"rex {' '.join(args[:3])} on {self.host or 'this machine'} did not answer within {limit:g}s: the Rex host "
+                "is not responding (set REX_CREW_TIMEOUT to wait longer)", 4)
         if check and p.returncode != 0:
             die(f"rex {' '.join(args[:3])} failed: {p.stderr.strip()[:300]}")
         return p
@@ -86,18 +100,20 @@ class Rex:
             j = min(i + 30000, len(raw))
             while j < len(raw) and (raw[j] & 0xC0) == 0x80:  # never cut inside a UTF-8 character
                 j -= 1
-            self.call("send", "-s", self.session, "-b", block, raw[i:j].decode())
+            piece = raw[i:j].decode()
+            # text that starts with a dash must not be read as an option
+            self.call("send", "-s", self.session, "-b", block, *(["--"] if piece.startswith("-") else []), piece)
             i = j
             if i >= len(raw):
                 return
 
-    def sh(self, script):
+    def sh(self, script, wait=None):
         """Run a shell script on the host in a throwaway tab; return (exit status, output)."""
         if len(script.encode()) > 60000:  # one Rex control request is limited to 65536 bytes
             die("that command is too long for the host: one Rex control request is limited to 65536 bytes. "
                 "Put it in a file in the directory and run the file", 2)
         p = self.call("run", "-s", self.session, "--label", "crew-sh", "--keep-open", "--focus=false",
-                      "--json", "--wait", "--", "sh", "-c", script, check=False)
+                      "--json", "--wait", "--", "sh", "-c", script, check=False, wait=wait)
         try:
             block = jload(p.stdout)["block_ids"][0]
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
@@ -126,11 +142,30 @@ def ledger_raw():
         pass
     try:
         aside = f"{LEDGER}.corrupt-{int(time.time())}"
+        while os.path.exists(aside):  # two in one second: do not overwrite the first
+            aside += "x"
         os.replace(LEDGER, aside)
+        prune_litter()
         print(f"rex-crew: the ledger {LEDGER} is corrupt; kept as {aside}, starting an empty one", file=sys.stderr)
     except OSError:
         print(f"rex-crew: the ledger {LEDGER} is unreadable; treating it as empty", file=sys.stderr)
     return []
+
+
+def prune_litter(keep=5):
+    """Files next to the ledger that nothing reads again: old .corrupt-* copies (the newest few stay) and temp files
+    a killed write left behind. The .lock file stays: removing it while another process holds it would split the lock."""
+    d, base = os.path.dirname(LEDGER), os.path.basename(LEDGER)
+    try:
+        names = [n for n in os.listdir(d) if n.startswith(base + ".")]
+        mt = lambda n: (os.path.getmtime(os.path.join(d, n)), n)
+        corrupt = sorted((n for n in names if n.startswith(base + ".corrupt-")), key=mt)
+        stale = [n for n in names if n != base + ".lock" and not n.startswith(base + ".corrupt-")
+                 and time.time() - os.path.getmtime(os.path.join(d, n)) > 3600]
+        for n in corrupt[:-keep] + stale:
+            os.remove(os.path.join(d, n))
+    except OSError:
+        pass
 
 
 def ledger_load():
@@ -166,6 +201,10 @@ def ledger_update(run, base=None, locked=False):
         if base and old and (old[0].get("state"), old[0].get("t0")) != base:
             run = {**run, "state": old[0].get("state"), "t0": old[0].get("t0"), "seen": old[0].get("seen", False)}
         runs = [r for r in ledger_raw() if not (isinstance(r, dict) and r.get("id") == run["id"])] + [run]
+        # A start that never became a worker (no pane) leaves nothing worth keeping; a claim stuck for long is dead.
+        runs = [r for r in runs if not (isinstance(r, dict) and not r.get("block") and (
+            r.get("state") == "gone" or (r.get("state") == "starting" and time.time() - r.get("t0", 0) > 600)))]
+        prune_litter()
         while len(runs) > 300:  # the cap drops the oldest finished entry, never a live worker
             i = next((i for i, r in enumerate(runs) if not (isinstance(r, dict) and r.get("state") in LIVE)), None)
             if i is None:
@@ -366,7 +405,7 @@ def tick(rex, run, policy):
     state, age = rec.get("state", "none"), time.time() - run["t0"]
     if state != "blocked":
         run.pop("press", None)
-    if state != "idle":
+    if state not in ("idle", "done"):
         run.pop("idle", None)
     if state == "gone":  # one failed status call is not a vanished pane: ask again on the next pass
         run["gone"] = run.get("gone", 0) + 1
@@ -376,8 +415,9 @@ def tick(rex, run, policy):
         run["seen"] = True
     elif state == "done" and (run.get("seen") or age > 30):
         return {"state": "done"}
-    elif state == "idle" and (run.get("seen") or age > 30):
-        run["idle"] = run.get("idle", 0) + 1  # idle for one look can be the gap between two turns: see it twice
+    elif state in ("idle", "done") and (run.get("seen") or age > 30 or state == "done"):
+        # idle for one look can be the gap between two turns, and a young done we never saw working may be stale: see it twice
+        run["idle"] = run.get("idle", 0) + 1
         if run["idle"] >= 2:
             return {"state": "done"}
     elif state == "error":
@@ -462,11 +502,32 @@ def launch(rex, a, agent_args, task, claim):
     # The prompt goes first: --allowedTools is variadic and would swallow it.
     line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd -- " + d
             + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
-    p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
-    run = {**claim, "block": jload(p.stdout)["block_ids"][0], "verify": a.verify, "verify_timeout": a.verify_timeout,
+    try:
+        p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
+        block = jload(p.stdout)["block_ids"][0]
+    except (SystemExit, ValueError, KeyError, IndexError, TypeError, AttributeError):
+        close_strays(rex, a.name)  # the pane may exist although the answer never came: do not leave it running unrecorded
+        raise
+    run = {**claim, "block": block, "verify": a.verify, "verify_timeout": a.verify_timeout,
            "trust": a.trust, "keep": a.keep, "state": "open", "t0": time.time()}
-    ledger_update(run)
+    try:
+        ledger_update(run)
+    except SystemExit:
+        rex.call("block", "close", "-s", rex.session, block, check=False)
+        raise
     return run
+
+
+def close_strays(rex, name):
+    """After a start that failed half way: close panes labelled NAME that no ledger entry knows."""
+    try:
+        known = {r["block"] for r in ledger_load()}
+        for b in jload(rex.call("block", "ls", "-s", rex.session, "--json").stdout).get("blocks", []):
+            if b.get("label") == name and b.get("block_id") not in known:
+                rex.call("block", "close", "-s", rex.session, b["block_id"], check=False)
+                print(f"rex-crew: closed the half-started pane {b['block_id']} ({name})", file=sys.stderr)
+    except (SystemExit, ValueError, KeyError, TypeError, AttributeError):
+        print(f"rex-crew: could not check for a half-started pane named {name}; see 'rex-crew status'", file=sys.stderr)
 
 
 def finish(rex, run):
@@ -486,7 +547,8 @@ def finish(rex, run):
                   f"( sleep {vt}; : > \"$vf.to\"; kt $vp TERM; sleep 3; kt $vp KILL ) </dev/null >/dev/null 2>&1 & wp=$!; "
                   f"wait $vp 2>/dev/null; rc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then rc=timeout; fi; "
                   f"tail -n 15 \"$vf\" | tail -c 4000; rm -f \"$vf\" \"$vf.to\"; echo {m}RC $rc" if verify else f"echo {m}RC none"))
-    rc0, out = rex.sh(script)
+    # the verify command may run up to vt seconds: the call waits that long on top
+    rc0, out = rex.sh(script, **({"wait": rpc_timeout() + vt + 10} if verify else {}))
     part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
     notes, raw = [], part(m + "REPORT", m + "GIT")
     try:
@@ -553,6 +615,16 @@ def collect(rex, policy, timeout, only=None, rid=None):
     base = {r["id"]: (r["state"], r.get("t0")) for r in runs}
     pressed = 0  # keys we pressed for workers so far
 
+    def claim(r):
+        """Take the end of this worker under the lock, unless another process already did (then it is theirs to report)."""
+        with ledger_lock():
+            cur = [x for x in ledger_raw() if isinstance(x, dict) and x.get("id") == r["id"]]
+            if cur and (cur[0].get("state"), cur[0].get("t0")) != base[r["id"]]:
+                return False
+            ledger_update(r, locked=True)
+            base[r["id"]] = (r["state"], r.get("t0"))
+            return True
+
     def one(r):
         """Look at one worker; a host failure on it is reported and must not cost the others their results."""
         nonlocal worst, asked, pressed
@@ -566,6 +638,8 @@ def collect(rex, policy, timeout, only=None, rid=None):
                 return
             runs.remove(r)
             r["state"] = res["state"]
+            if res["state"] in ("done", "gone") and not claim(r):
+                return  # another collect took this worker's result: it reports it, not this one
             if res["state"] == "done":
                 res.update(finish(rex, r))
                 if res.get("attention"):  # decided before anything is printed: show() must say what counts
@@ -586,7 +660,10 @@ def collect(rex, policy, timeout, only=None, rid=None):
         worst = max(worst, EXIT[res["state"]])
         asked = asked or res["state"] == "blocked"
 
-    while runs and (first or time.time() - t0 < timeout):  # always look once, even with --timeout 0
+    extra = True  # a worker seen finished once needs a second look: with --timeout 0 that look is still made
+    while runs and (first or time.time() - t0 < timeout or (extra and any(r.get("idle") for r in runs))):
+        if not first and time.time() - t0 >= timeout:
+            extra = False
         first = False
         before = pressed
         for r in list(runs):
@@ -708,7 +785,7 @@ def cmd_answer(rex, a):
     rec = rex.status(a.block)
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
         die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", 6)
-    if re.fullmatch(r"[0-9]+", a.choice):
+    if re.fullmatch(r"[0-9]+", a.choice) and not a.text:
         rex.type(a.block, a.choice)
     else:
         free = re.search(r"(\d+)\. Type something", rex.screen(a.block, 30))
@@ -777,8 +854,17 @@ def selftest():
 def main():
     if sys.argv[1:2] == ["selftest"]:
         return selftest()
-    argv, agent_args = sys.argv[1:], []
-    if "--" in argv:
+    argv, agent_args, literal = sys.argv[1:], [], None
+    # `send` and `sh` pass their words on as they are: text like -1 or -x is not an option, and a bare -- is not claude's.
+    i = 0
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 2 if argv[i] in ("-S", "--host", "-s", "--session") else 1
+    tail = argv[i + 1:]
+    if argv[i:i + 1] == ["sh"] and tail and tail not in (["-h"], ["--help"]):
+        literal, argv = ("command", tail[1:] if tail[:1] == ["--"] else tail), argv[:i + 1] + ["-"]
+    elif argv[i:i + 1] == ["send"] and len(tail) > 1 and tail[0] not in ("-h", "--help"):
+        literal, argv = ("text", tail[2:] if tail[1:2] == ["--"] else tail[1:]), argv[:i + 1] + [tail[0], "-"]
+    if "--" in argv and not literal:
         i = argv.index("--")
         argv, agent_args = argv[:i], argv[i + 1:]
     raw = argparse.RawDescriptionHelpFormatter
@@ -817,7 +903,8 @@ def main():
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
     ap.add_argument("block"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 7)"); ap.set_defaults(fn=cmd_approve)
     an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
-    an.add_argument("block"); an.add_argument("choice"); an.set_defaults(fn=cmd_answer)
+    an.add_argument("block"); an.add_argument("choice")
+    an.add_argument("--text", action="store_true", help="CHOICE is free text, even if it is only digits (e.g. a year)"); an.set_defaults(fn=cmd_answer)
     dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
     sc = sub.add_parser("screen", help="the last visible lines of a worker's pane")
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)
@@ -830,6 +917,10 @@ def main():
 
     a = p.parse_args(argv)
     a.agent_args = agent_args
+    if literal:
+        if not literal[1]:
+            p.error(f"the following arguments are required: {literal[0]}")
+        setattr(a, literal[0], literal[1])
     session = a.session or (None if a.host else os.environ.get("REX_SESSION"))
     if not session and a.cmd != "session":
         die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", 2)
