@@ -91,10 +91,10 @@ A JSON file with two lists of regular expressions, matched against the prompt te
 ```
 
 A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. A chained command
-(`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. A command that redirects output into a file is never
+(`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. A newline also separates commands. Command substitution (`$(…)`, backticks) is never answered for you. `never` also sees the command with quotes removed (`~/.s''sh` = `~/.ssh`). A command that redirects output into a file (including `&>` and `>&`) is never
 answered for you (`2>&1` and `>/dev/null` do not count). It is re-read
 immediately before the key is pressed, and the answer is always the one-time Yes, never "always".
-Without `--policy`, nothing is answered for you. Start from `policy.example.json` and keep the list short.
+Write `approve` patterns that end in `(\\s|$)`, not `\\b` (`\\b` lets `npm run build:publish` through). Read-only tools can still write or run code through options (`sort -o`, `git diff --output`, `rg --pre`); the example `never` list covers those. Without `--policy`, nothing is answered for you. Start from `policy.example.json` and keep the list short.
 
 Two limits to know. Read-only patterns such as `cat` or `grep` approve reading anywhere the worker's user can read,
 so keep secret locations in `never`, as the example does. And `acceptEdits` lets Claude Code create, move and delete

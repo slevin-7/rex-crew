@@ -96,7 +96,9 @@ not a sandbox: a pattern that is too wide approves too much.
 ## Limits
 
 - Claude Code only. Other agents' dialogs are not answered; their questions still come back to you.
-- A chained command is answered for you only if every part is approved; output redirection into a file never is.
+- A chained command (`;`, `&&`, `|`, newline) is answered for you only if every part is approved; any redirection into a file
+  (`>`, `&>`, `>&`, `<(`) and any command substitution (`$(…)`, backticks) never is. `never` is checked against the command
+  as written and as the shell reads it (`~/.s''sh` counts as `~/.ssh`). Globs (`~/.ss?/*`) are not expanded: keep secrets out of reach by other means too.
 - Workers do not message each other. The orchestrator passes results on, usually as the next task's input.
 - Every host step opens and closes a short-lived tab named `crew-sh`.
 
