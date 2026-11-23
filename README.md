@@ -83,8 +83,12 @@ rex-crew status                      # every reporting pane: state and open ques
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or
 oversized report, failed or hung verify, uncommitted changes, host output cut; the pane stays open so you can `screen` and `send`), `2` needs you,
 `3` timeout (`--timeout` seconds, default 900), `4` error, `5` pane gone, `6` unknown NAME. A `--policy` file that is missing or malformed exits `2` before any pane opens.
-`collect` hands back as soon as any worker needs you (whatever the other workers' codes), looks at every worker at least
-once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits `6`
+`collect` hands back as soon as any worker needs you and then exits 2, whatever the other workers' codes (a question outranks an error).
+Before it hands back it serves the other workers for up to three more passes (about 12 s) as long as it is still pressing
+routine keys for them, so a question does not stall them; after you answer, run `collect` again at once. A host failure on one
+worker is reported for that worker only (exit 4, collect it again later); a result that is not clean is printed as `state: unclean` (its pane stays open).
+A worker must be `idle` on two looks in a row to count as finished. It looks at every worker at least
+once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits 6
 for a NAME it has never started. A pane counts as gone only after two failed status calls in a row.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 

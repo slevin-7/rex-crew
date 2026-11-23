@@ -152,7 +152,10 @@ class TestSymlinkDir(HostBase):
         real = self.workdir("real")
         link = f"{self.tmp.name}/link"
         os.symlink(real, link)
-        code, out, _ = self.finished(link, "w1")
+        self.script("w1", rec("working"), rec("done"))
+        self.assertEqual(self.cli("start", "w1", link, self.task)[0], 0)
+        self.report(real, "w1")  # start clears old reports; a result without one is "unclean", so write it after start
+        code, out, _ = self.cli("collect")
         self.assertIn("state: done", out)
 
 
