@@ -115,6 +115,7 @@ Not affiliated with Superlogical.
 
 ```sh
 skills/rex-crew/scripts/rex-crew selftest
+python3 -m unittest discover -s tests -v   # needs no Rex: uses tests/fake_rex
 ```
 
 MIT licensed.
