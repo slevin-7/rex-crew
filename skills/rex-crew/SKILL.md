@@ -44,8 +44,9 @@ NEXT: surface the retry count in the logs
 | 1 | `unclean` | The turn ended, but an `ATTENTION:` line says what is wrong. |
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
 | 3 | `timeout` | Still working. `collect` waits again. |
-| 4 | `error` | The worker reported an error; `screen BLOCK` shows it. |
-| 5 | `gone` | The pane is closed. |
+| 4 | `error` | The worker reported an error; `screen BLOCK` shows it. It may recover: `collect` again picks it up. |
+| 5 | `gone` | The pane is closed (two failed status calls in a row). |
+| 6 | (no state) | `collect NAME` for a name that was never started: check `runs`. |
 
 ## Several workers at once
 

@@ -56,9 +56,9 @@ class Rex:
         p = self.call("block", "call", "-s", self.session, "-b", block, "program_status", check=False)
         try:
             recs = json.loads(p.stdout).get("records") or []
-        except ValueError:
+        except (ValueError, AttributeError):
             return {"state": "gone"}
-        return recs[0] if recs else {}
+        return recs[0] if recs and isinstance(recs[0], dict) else {}
 
     def screen(self, block, lines=20):
         out = self.call("capture", "-s", self.session, "-b", block, "--trim", check=False).stdout
@@ -163,8 +163,8 @@ def guard(block):
 
 def question(rec):
     """`permission approve Bash: git status` -> ('permission', 'Bash: git status')."""
-    msg = rec.get("msg") or ""
-    return rec.get("kind") or "", msg.split("approve ", 1)[-1] if "approve " in msg else msg
+    msg, kind = str(rec.get("msg") or ""), str(rec.get("kind") or "")  # the record comes from the worker's terminal
+    return kind, msg.split("approve ", 1)[-1] if "approve " in msg else msg
 
 
 def load_policy(path):
@@ -230,6 +230,8 @@ def approve_once(rex, block, expect):
 
 def trust(rex, run):
     """Confirm the folder-trust dialog, but only if it names this worker's directory."""
+    if time.time() - run.get("trust_at", 0) < 10:
+        return True  # we pressed a moment ago; give the dialog time to close instead of pressing again
     squash = lambda t: re.sub(r"\s", "", t)
     scr = rex.screen(run["block"], 16)
     if not (run.get("trust") and "trust" in scr.lower() and squash(run["dir"].rstrip("/")) in squash(scr)):
@@ -238,7 +240,7 @@ def trust(rex, run):
     time.sleep(1)
     rex.key(run["block"], "enter")
     run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
-    run["t0"] = time.time()
+    run["t0"] = run["trust_at"] = time.time()
     return True
 
 
@@ -247,6 +249,12 @@ def tick(rex, run, policy):
     approve, never = policy
     rec = rex.status(run["block"])
     state, age = rec.get("state", "none"), time.time() - run["t0"]
+    if state != "blocked":
+        run.pop("press", None)
+    if state == "gone":  # one failed status call is not a vanished pane: ask again on the next pass
+        run["gone"] = run.get("gone", 0) + 1
+        return {"state": "gone"} if run["gone"] >= 2 else None
+    run.pop("gone", None)
     if state == "working":
         run["seen"] = True
     elif state in ("done", "idle") and (run.get("seen") or age > 30):
@@ -258,13 +266,19 @@ def tick(rex, run, policy):
         if "trust this folder" in text.lower():  # reported as a permission prompt by newer Claude Code
             return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
         run["seen"] = True
-        if kind == "permission" and routine(text, approve, never) and approve_once(rex, run["block"], text):
-            run.setdefault("approved", []).append(text)
-            return None
+        if kind == "permission" and routine(text, approve, never):
+            last, n, at = run.get("press") or ["", 0, 0]
+            n, at = (n, at) if last == text else (0, 0)
+            if n and time.time() - at < 10:
+                return None  # the same prompt is still up right after our key: wait, do not type a second 1
+            if n >= 3:
+                return {"state": "blocked", "kind": kind, "question": text + "  (approved 3 times, the prompt stays)"}
+            if approve_once(rex, run["block"], text):
+                run["press"] = [text, n + 1, time.time()]
+                run.setdefault("approved", []).append(text)
+                return None
         return {"state": "blocked", "kind": kind, "question": text}
-    elif state == "gone":
-        return {"state": "gone"}
-    elif age > 15 and not run.get("seen"):
+    elif state == "none" and age > 15 and not run.get("seen"):
         # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
         return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
     return None
@@ -340,7 +354,7 @@ def show(run, res):
     if run.get("approved"):
         print(f"auto-approved ({len(run['approved'])}): " + " | ".join(x[:60] for x in run["approved"][-5:]))
     if res["state"] in ("blocked", "error"):
-        print(f"needs you ({res.get('kind', 'error')}): {res.get('question', '')}")
+        print(f"needs you ({res.get('kind') or res['state']}): {res.get('question') or '(no message; look at the pane)'}")
     if "git" in res:
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
@@ -352,12 +366,19 @@ def show(run, res):
 
 def collect(rex, policy, timeout, only=None):
     """Watch every open worker of this session. Returns when all are done, or one needs a person."""
-    runs = [r for r in mine(rex) if not only or r["name"] == only]
+    runs = [r for r in mine(rex, ("open", "blocked", "timeout", "error")) if not only or r["name"] == only]
     if not runs:
+        known = [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session and r["name"] == only]
+        if only and not known:
+            die(f"no worker named {only} in this session (see: rex-crew runs)", 6)
+        if known:  # finished earlier: say how, with the exit code of that outcome
+            print(f"{only} already finished: state {known[-1]['state']}")
+            return EXIT.get(known[-1]["state"], 0)
         print("no open workers in this session")
         return 0
-    t0, worst = time.time(), 0
-    while runs and time.time() - t0 < timeout:
+    t0, worst, asked, first = time.time(), 0, False, True
+    while runs and (first or time.time() - t0 < timeout):  # always look once, even with --timeout 0
+        first = False
         for r in list(runs):
             res = tick(rex, r, policy)
             if not res:
@@ -373,7 +394,8 @@ def collect(rex, policy, timeout, only=None):
                 r["state"] = res["state"] = "unclean"
             ledger_update(r)
             worst = max(worst, EXIT[res["state"]])
-        if worst == 2:  # someone waits for the orchestrator: say who is still working and hand back
+            asked = asked or res["state"] == "blocked"
+        if asked:  # someone waits for the orchestrator: say who is still working and hand back
             break
         if runs:
             time.sleep(4)
