@@ -139,7 +139,7 @@ exit 1, so never read a worker's summary without the lines above it.
    cannot see your conversation.
 2. **Read facts before prose.** `verify` and `git` come from the host, the report from the worker.
 3. **Never pass `--dangerously-skip-permissions` or `bypassPermissions`.** Use `acceptEdits` plus a policy.
-4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; two simultaneous `start`s cannot both win). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch so you can retry. `sh` says on stderr when the host's terminal cut the start of the output. Give parallel workers their own checkout or worktree, and copy
+4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; a worker in state `error` still holds its directory until it is closed or its pane is really gone, and `close` marks it closed; two simultaneous `start`s cannot both win). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch so you can retry. `sh` says on stderr when the host's terminal cut the start of the output. Give parallel workers their own checkout or worktree, and copy
    generated files they need (project files, `.env.example`) into it first.
 5. **Paths are the host's, and absolute.** `$HOME` and `~` are not expanded in `DIR`.
 6. **Never type into your own pane.** `send`, `approve`, `deny` and `close` refuse `$REX_BLOCK`.
