@@ -77,7 +77,7 @@ Exit status of `run` and `wait`: `0` done, `2` needs you, `3` timeout, `4` error
 
 ```json
 { "approve": ["^Bash: (git (status|log|diff|add|commit)|npm test)\\b"],
-  "never":   ["\\b(rm|sudo|curl)\\b", "git push", "[;&|`$]"] }
+  "never":   ["\\b(rm|sudo|curl)\\b", "git push", "`|\\$\\("] }
 ```
 
 Patterns are matched against the prompt as the agent reports it, such as `Bash: git status`. `never` wins.

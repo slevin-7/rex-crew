@@ -1,11 +1,12 @@
 {
   "approve": [
-    "^Bash: (rtk )?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail)\\b",
+    "^Bash: (rtk )?(git (status|log|diff|show|add|commit)|read|recall|grep|rg|ls|wc|cat|head|tail|sort|uniq)\\b",
     "^Bash: (rtk )?(swift (test|build)|xcodebuild|npm (test|run build)|cargo (test|build|check)|pytest|go (test|build))\\b"
   ],
   "never": [
     "\\b(rm|sudo|curl|wget|ssh|scp|chmod|chown|kill|open|osascript)\\b",
     "git (push|reset|clean|checkout|rebase|stash|config|remote)",
-    "[;&|`$]"
+    "`|\\$\\(",
+    "(?<![0-9&])>(?!&)"
   ]
 }

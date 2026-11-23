@@ -96,8 +96,31 @@ def load_policy(path):
     return [re.compile(x) for x in p.get("approve", [])], [re.compile(x) for x in p.get("never", [])]
 
 
+def parts(text):
+    """`Bash: a; b | c` -> ['Bash: a', 'Bash: b', 'Bash: c'], splitting only outside quotes."""
+    tool, sep, body = text.partition(": ")
+    if tool != "Bash" or not sep:
+        return [text]
+    try:
+        lex = shlex.shlex(body, posix=True, punctuation_chars=";&|")
+        lex.whitespace_split = True
+        out, cur = [], []
+        for tok in lex:
+            if tok and set(tok) <= set(";&|"):
+                out.append(cur); cur = []
+            else:
+                cur.append(tok)
+        out.append(cur)
+    except ValueError:
+        return [text]  # unbalanced quotes: treat as one command, which no pattern should approve
+    return [f"Bash: {' '.join(c)}" for c in out if c]
+
+
 def routine(text, approve, never):
-    return bool(text) and not any(r.search(text) for r in never) and any(r.search(text) for r in approve)
+    """Every command of a chain must be approved on its own; one `never` hit rejects the whole prompt."""
+    if not text or any(r.search(text) for r in never):
+        return False
+    return all(any(r.search(p) for r in approve) for p in parts(text))
 
 
 def approve_once(rex, block, expect):
@@ -277,6 +300,9 @@ def selftest():
     assert routine("Bash: rtk git log -1", ap, nv)
     assert not routine("Bash: git status; rm -rf x", ap, nv)
     assert not routine("Bash: git push", ap, nv) and not routine("", ap, nv)
+    assert routine("Bash: git status; rtk git log -3", ap, nv)
+    assert not routine("Bash: git status; whoami", ap, nv)
+    assert parts('Bash: grep "a|b" f | head') == ["Bash: grep a|b f", "Bash: head"]
     assert question({"kind": "permission", "msg": "hook failed · approve Bash: ls"}) == ("permission", "Bash: ls")
     assert question({}) == ("", "")
     print("selftest ok")

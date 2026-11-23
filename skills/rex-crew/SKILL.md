@@ -65,10 +65,11 @@ A JSON file with two lists of regular expressions, matched against the prompt te
 
 ```json
 { "approve": ["^Bash: (git (status|log|diff)|npm test)\\b"],
-  "never":   ["\\b(rm|sudo|curl)\\b", "git push", "[;&|`$]"] }
+  "never":   ["\\b(rm|sudo|curl)\\b", "git push", "`|\\$\\("] }
 ```
 
-A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. It is re-read
+A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. A chained command
+(`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. It is re-read
 immediately before the key is pressed, and the answer is always the one-time Yes, never "always".
 Without `--policy`, nothing is answered for you. Start from `policy.example.json` and keep the list short.
 
