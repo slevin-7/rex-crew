@@ -6,7 +6,11 @@ status, answers routine permission prompts from a policy file, hands every other
 you, and returns each worker's written report plus what is actually on disk (git, a verify command).
 `run` is both for a single task. Standard library only. See README.md.
 """
-import argparse, base64, json, os, re, shlex, subprocess, sys, time
+import argparse, base64, contextlib, json, os, re, shlex, subprocess, sys, tempfile, time
+try:
+    import fcntl
+except ImportError:  # no flock on this platform: updates are still atomic, just not serialized
+    fcntl = None
 
 REPORT_PROTOCOL = """
 
@@ -81,25 +85,74 @@ class Rex:
 
 # ---- ledger: what was started, so a later call (or a later session) can pick it up -----------------
 
-def ledger_load():
+LIVE = ("open", "blocked", "timeout")
+LEDGER_KEYS = ("id", "name", "block", "state")
+
+
+def ledger_raw():
+    """The file's list as it is. A file that is not a JSON list is moved aside (never overwritten) and read as empty."""
     try:
         with open(LEDGER) as f:
-            return json.load(f)
-    except (OSError, ValueError):
+            data = json.load(f)
+        if isinstance(data, list):
+            return data
+    except FileNotFoundError:
         return []
+    except (OSError, ValueError):
+        pass
+    try:
+        aside = f"{LEDGER}.corrupt-{int(time.time())}"
+        os.replace(LEDGER, aside)
+        print(f"rex-crew: the ledger {LEDGER} is corrupt; kept as {aside}, starting an empty one", file=sys.stderr)
+    except OSError:
+        print(f"rex-crew: the ledger {LEDGER} is unreadable; treating it as empty", file=sys.stderr)
+    return []
+
+
+def ledger_load():
+    """Usable entries only: dicts that have the keys every command relies on (older versions may lack some)."""
+    out = []
+    for r in ledger_raw():
+        if isinstance(r, dict) and all(k in r for k in LEDGER_KEYS):
+            out.append({"host": "", "session": "", "dir": "", **r})
+    return out
+
+
+@contextlib.contextmanager
+def ledger_lock():
+    """One writer at a time (read-modify-write); a state path that cannot be written is a clear error."""
+    try:
+        os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+        f = open(LEDGER + ".lock", "a")
+    except OSError as e:
+        die(f"cannot use the ledger at {LEDGER}: {e}. Set REX_CREW_STATE to a writable file", 4)
+    try:
+        if fcntl:
+            fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+    finally:
+        f.close()
 
 
 def ledger_update(run):
-    runs = [r for r in ledger_load() if r["id"] != run["id"]] + [run]
-    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
-    with open(LEDGER + ".tmp", "w") as f:
-        json.dump(runs[-300:], f, indent=1)
-    os.replace(LEDGER + ".tmp", LEDGER)
+    with ledger_lock():
+        runs = [r for r in ledger_raw() if not (isinstance(r, dict) and r.get("id") == run["id"])] + [run]
+        while len(runs) > 300:  # the cap drops the oldest finished entry, never a live worker
+            i = next((i for i, r in enumerate(runs) if not (isinstance(r, dict) and r.get("state") in LIVE)), None)
+            if i is None:
+                break
+            del runs[i]
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=os.path.basename(LEDGER) + ".", dir=os.path.dirname(LEDGER))
+            with os.fdopen(fd, "w") as f:
+                json.dump(runs, f, indent=1)
+            os.replace(tmp, LEDGER)
+        except OSError as e:
+            die(f"cannot write the ledger {LEDGER}: {e}", 4)
 
 
-def mine(rex, states=("open", "blocked", "timeout")):
+def mine(rex, states=LIVE):
     return [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session and r["state"] in states]
-
 
 # ---- prompts and policy -----------------------------------------------------------------------------
 
@@ -213,7 +266,14 @@ def tick(rex, run, policy):
 def start(rex, a, agent_args):
     if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", a.name):
         die("NAME must be lowercase a-z0-9_- and at most 32 characters", 2)
+    with ledger_lock():  # fail before any pane exists if the ledger cannot be written
+        pass
     busy = [r for r in mine(rex) if r["dir"].rstrip("/") == a.dir.rstrip("/")]
+    for r in list(busy):
+        if rex.status(r["block"]).get("state") == "gone":  # its pane is closed: it cannot hold the directory
+            r["state"] = "gone"
+            ledger_update(r)
+            busy.remove(r)
     if busy:
         die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
     task = sys.stdin.read() if a.task == "-" else open(os.path.expanduser(a.task)).read()
@@ -234,7 +294,7 @@ def start(rex, a, agent_args):
     line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd " + d
             + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
     p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
-    run = {"id": f"{int(time.time())}-{a.name}", "name": a.name, "dir": a.dir, "host": rex.host or "", "session": rex.session,
+    run = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "host": rex.host or "", "session": rex.session,
            "block": json.loads(p.stdout)["block_ids"][0], "verify": a.verify, "trust": a.trust, "keep": a.keep,
            "state": "open", "t0": time.time(), "started": time.strftime("%Y-%m-%d %H:%M")}
     ledger_update(run)
@@ -335,10 +395,10 @@ def cmd_collect(rex, a):
 
 
 def cmd_runs(rex, a):
-    for r in ledger_load()[-(a.last or 20):]:
-        if a.all or (r["host"] == (rex.host or "") and r["session"] == rex.session):
-            print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
-                             "" if r["state"] in ("done", "closed", "gone") else r["block"]]))
+    shown = [r for r in ledger_load() if a.all or (r["host"] == (rex.host or "") and r["session"] == rex.session)]
+    for r in shown[-(a.last or 20):]:
+        print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
+                         "" if r["state"] in ("done", "closed", "gone") else r["block"]]))
 
 
 def cmd_checkout(rex, a):

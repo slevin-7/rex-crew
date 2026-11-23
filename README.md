@@ -75,6 +75,8 @@ rex-crew answer BLOCK 2              # answer a worker's own question: option nu
 rex-crew send BLOCK "text"           # refused unless the worker is at its prompt
 rex-crew sh 'git -C /abs/repo log --oneline -3'   # any shell command on the host
 rex-crew runs                        # ledger of started workers, kept on disk across conversations
+# The ledger is ~/.local/state/rex-crew/runs.json (override: REX_CREW_STATE). An unreadable file is moved aside as
+# runs.json.corrupt-<time>, never overwritten; a state path that cannot be written stops `start` before any pane opens.
 rex-crew status                      # every reporting pane: state and open question
 ```
 

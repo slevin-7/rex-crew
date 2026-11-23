@@ -122,7 +122,7 @@ exit 1, so never read a worker's summary without the lines above it.
 |---|---|
 | `status [--all]` | Every reporting pane: state, label, block, open question. |
 | `sh COMMAND` | Run one shell command on the host and print its output: git, a build, a look at a file. |
-| `runs [--all]` | The ledger: workers started in this session, their state and block. |
+| `runs [--all]` | The ledger: workers started in this session, their state and block. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>`, and `start` fails early if the path is unwritable. A worker whose pane is gone no longer holds its directory. |
 | `screen BLOCK [LINES]` | The visible end of a pane. Agents draw on the alternate screen, so there is no scrollback: long answers belong in the report file. |
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
