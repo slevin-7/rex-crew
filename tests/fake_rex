@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""A fake `rex` CLI for testing rex-crew without Rex. State lives in the JSON file named by FAKE_REX_STATE.
+
+State layout:
+  {"next": 1, "sessions": [{"session_id", "label"}],
+   "scripts": {LABEL: [record, ...]},   # what a block started with --label LABEL reports, one record per
+                                        # program_status call; the last record repeats. The string "GONE"
+                                        # as a record makes the pane disappear at that call.
+   "blocks": {ID: {"label", "output", "script", "closed", "session"}},
+   "sent": [{"block", "kind": "text"|"key", "value"}]}
+`run --wait -- sh -c CMD` really runs CMD locally; its output is what `capture` returns for that block.
+"""
+import json, os, subprocess, sys
+
+PATH = os.environ["FAKE_REX_STATE"]
+
+
+def load():
+    try:
+        with open(PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"next": 1, "sessions": [], "scripts": {}, "blocks": {}, "sent": []}
+
+
+def save(st):
+    with open(PATH + ".tmp", "w") as f:
+        json.dump(st, f)
+    os.replace(PATH + ".tmp", PATH)
+
+
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def opts(args, valued):
+    """Split args into ({option: value}, [positionals]); options in `valued` take a value, other -x are flags."""
+    o, pos, i = {}, [], 0
+    while i < len(args):
+        a = args[i]
+        if a in valued:
+            o[a] = args[i + 1]; i += 2
+        elif a.startswith("-") and len(a) > 1:
+            o[a] = True; i += 1
+        else:
+            pos.append(a); i += 1
+    return o, pos
+
+
+def live(st, block):
+    b = st["blocks"].get(block)
+    if not b or b.get("closed"):
+        fail(f"no such block: {block}")
+    return b
+
+
+def main():
+    argv = sys.argv[1:]
+    # global option -S HOST is accepted and ignored
+    if argv[:1] == ["-S"]:
+        argv = argv[2:]
+    st, cmd = load(), argv[0] if argv else ""
+    if cmd == "run":
+        rest = argv[1:]
+        i = rest.index("--")
+        o, _ = opts(rest[:i], {"-s", "--label"})
+        prog = rest[i + 1:]
+        bid = f"b{st['next']}"; st["next"] += 1
+        blk = {"label": o.get("--label", ""), "output": "", "closed": False, "session": o.get("-s", ""),
+               "script": list(st["scripts"].get(o.get("--label", ""), []))}
+        st["blocks"][bid] = blk
+        rc = 0
+        if "--wait" in o:
+            p = subprocess.run(prog, capture_output=True, text=True)
+            blk["output"], rc = p.stdout + p.stderr, p.returncode
+        save(st)
+        print(json.dumps({"block_ids": [bid]}))
+        sys.exit(rc)
+    if cmd == "block":
+        sub = argv[1]
+        if sub == "call":
+            o, pos = opts(argv[2:], {"-s", "-b"})
+            blk = live(st, o["-b"])
+            if pos != ["program_status"]:
+                fail("unsupported block call")
+            if blk["script"] and blk["script"][0] == "GONE":
+                blk["closed"] = True; save(st); fail("no such block")
+            rec = blk["script"][0] if blk["script"] else None
+            if len(blk["script"]) > 1:
+                blk["script"].pop(0)
+            save(st)
+            print(json.dumps({"records": [rec] if rec else []}))
+        elif sub == "close":
+            o, pos = opts(argv[2:], {"-s"})
+            live(st, pos[0])["closed"] = True; save(st)
+        elif sub == "ls":
+            o, _ = opts(argv[2:], {"-s"})
+            print(json.dumps({"blocks": [{"block_id": k, "label": b["label"]} for k, b in st["blocks"].items()
+                                         if not b["closed"] and b["session"] == o.get("-s", "")]}))
+        else:
+            fail("unsupported block command")
+    elif cmd == "capture":
+        o, _ = opts(argv[1:], {"-s", "-b"})
+        print(live(st, o["-b"])["output"], end="")
+    elif cmd in ("send", "send-key"):
+        o, pos = opts(argv[1:], {"-s", "-b"})
+        live(st, o["-b"])
+        st["sent"].append({"block": o["-b"], "kind": "text" if cmd == "send" else "key", "value": pos[0]})
+        save(st)
+    elif cmd == "ls":
+        print(json.dumps({"sessions": st["sessions"]}))
+    elif cmd == "new":
+        sid = f"s{len(st['sessions']) + 1}"
+        st["sessions"].append({"session_id": sid, "label": argv[1]}); save(st)
+        print(json.dumps({"session_id": sid}))
+    else:
+        fail(f"fake rex: unsupported command {cmd!r}")
+
+
+if __name__ == "__main__":
+    main()
