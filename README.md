@@ -72,11 +72,13 @@ rex-crew collect --policy policy.json   # reports each worker as it ends; exits 
 rex-crew approve BLOCK --match RE    # one-time Yes to the open prompt
 rex-crew deny BLOCK
 rex-crew answer BLOCK 2              # answer a worker's own question: option number or free text
+rex-crew answer BLOCK --text 2024    # free text that is only digits (plain digits press that option number)
 rex-crew send BLOCK "text"           # refused unless the worker is at its prompt
 rex-crew sh 'git -C /abs/repo log --oneline -3'   # any shell command on the host
 rex-crew runs                        # ledger of started workers, kept on disk across conversations
 # The ledger is ~/.local/state/rex-crew/runs.json (override: REX_CREW_STATE). An unreadable file is moved aside as
-# runs.json.corrupt-<time>, never overwritten; a state path that cannot be written stops `start` before any pane opens.
+# runs.json.corrupt-<time>, never overwritten (the newest 5 are kept, older ones are removed); a rex call that gets no answer
+# within REX_CREW_TIMEOUT seconds (default 120) stops with an error naming the host, and a `start` that failed half way closes its pane; a state path that cannot be written stops `start` before any pane opens.
 rex-crew status                      # every reporting pane: state and open question
 ```
 

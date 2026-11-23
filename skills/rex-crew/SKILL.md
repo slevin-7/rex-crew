@@ -64,7 +64,7 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 
 `collect` exits 0 when every worker is done, and 2 as soon as one needs you (2 wins over every other code, also over an error); it names the workers still running.
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
-answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again.
+answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again. A Rex host that does not answer one call within `REX_CREW_TIMEOUT` seconds (default 120) is an error that names the host, not a hang. Text for `send` and `sh` may start with a dash (`send BLOCK -1`). A worker whose first status is `done` is collected after two looks, and two `collect` processes report a worker only once.
 An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
 `checkout` accepts a relative repo path (resolved on the host); NAME follows the same rules as for `start`. `checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
 Integrate afterwards yourself, one branch at a time: `"$here/rex-crew" sh 'git -C /abs/repo merge --no-ff crew/api'`,
@@ -111,6 +111,7 @@ pass through your policy (`"^(Write|Edit): /abs/dir/"`).
 ```sh
 "$here/rex-crew" answer BLOCK 2                    # pick option 2 of the question it asked
 "$here/rex-crew" answer BLOCK "Use the staging DB"  # or type a free-text answer
+"$here/rex-crew" answer BLOCK --text 2024         # free text that is only digits (without --text, digits pick that option)
 ```
 
 Then `collect` again. `needs you (question): ...` shows the question and its options.
@@ -128,7 +129,7 @@ exit 1, so never read a worker's summary without the lines above it.
 |---|---|
 | `status [--all]` | Every reporting pane: state, label, block, open question. |
 | `sh COMMAND` | Run one shell command on the host and print its output: git, a build, a look at a file. |
-| `runs [--all]` | The ledger: workers started in this session, their state and block. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>`, and `start` fails early if the path is unwritable. A worker whose pane is gone no longer holds its directory. |
+| `runs [--all]` | The ledger: workers started in this session, their state and block. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>` (newest 5 stay), and `start` fails early if the path is unwritable. A worker whose pane is gone no longer holds its directory. |
 | `screen BLOCK [LINES]` | The visible end of a pane. Agents draw on the alternate screen, so there is no scrollback: long answers belong in the report file. |
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |

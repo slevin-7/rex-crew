@@ -40,6 +40,8 @@ def opts(args, valued):
     o, pos, i = {}, [], 0
     while i < len(args):
         a = args[i]
+        if a == "--":
+            pos += args[i + 1:]; break
         if a in valued:
             o[a] = args[i + 1]; i += 2
         elif a.startswith("-") and len(a) > 1:
@@ -56,13 +58,29 @@ def live(st, block):
     return b
 
 
+def hang_wanted(argv):
+    """FAKE_REX_HANG="cmd[:label],...": that command does its work, then never answers (a host that stopped talking)."""
+    cmd = argv[0] if argv else ""
+    label = argv[argv.index("--label") + 1] if "--label" in argv else ""
+    return any(w in (cmd, f"{cmd}:{label}") for w in os.environ.get("FAKE_REX_HANG", "").split(",") if w)
+
+
 def main():
     lock = open(PATH + ".lock", "a")  # concurrent rex-crew processes share one fake host
     fcntl.flock(lock, fcntl.LOCK_EX)
     argv = sys.argv[1:]
-    # global option -S HOST is accepted and ignored
     if argv[:1] == ["-S"]:
         argv = argv[2:]
+    try:
+        dispatch(argv)
+    finally:
+        if hang_wanted(argv):
+            lock.close()
+            import time
+            time.sleep(60)
+
+
+def dispatch(argv):
     st, cmd = load(), argv[0] if argv else ""
     if os.environ.get("FAKE_REX_WARN") and cmd != "capture":  # a flaky host: noise on stdout before the JSON
         print(os.environ["FAKE_REX_WARN"])
