@@ -31,7 +31,10 @@ class Base(unittest.TestCase):
         for k in ("REX_BLOCK", "REX_CREW_HOST", "REX_SESSION"):
             os.environ.pop(k, None)
         self.env = dict(os.environ)
-        self.mod = importlib.machinery.SourceFileLoader("rex_crew_under_test", SCRIPT).load_module()
+        # load_module() is gone in Python 3.15; build the module from a spec instead.
+        loader = importlib.machinery.SourceFileLoader("rex_crew_under_test", SCRIPT)
+        self.mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(self.mod)
         sl = mock.patch.object(self.mod.time, "sleep", lambda s: None)
         sl.start(); self.addCleanup(sl.stop)
         self.task = f"{t}/task.md"
@@ -114,8 +117,8 @@ class TestWorkers(Base):
         self.script("w1", rec("working"), rec("done"))
         self.cli("start", "w1", d, self.task)
         code, out, _ = self.cli("collect")
-        self.assertEqual(code, 0)
-        self.assertIn("the worker wrote no report file", out)
+        self.assertEqual(code, 1)  # the turn ended, but without a report it is not a clean result
+        self.assertIn("ATTENTION: the worker wrote no report file", out)
 
     def test_failing_verify_is_reported(self):
         d = self.workdir()
