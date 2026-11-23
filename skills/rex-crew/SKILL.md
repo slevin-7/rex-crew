@@ -116,8 +116,8 @@ Then `collect` again. `needs you (question): ...` shows the question and its opt
 ## What "done" means
 
 `state: done` says the worker's turn ended. `ATTENTION:` lines say when that is not a clean result: no report file,
-a report whose STATUS is not `done`, a report that is a symlink (never read) or longer than 100000 bytes (cut), a failed
-verify command, or uncommitted changes. Verify output is shown as its last 15 lines, at most 4000 bytes. Any of them makes `collect`
+a report with no STATUS line (or only the template line `done | blocked | failed`), a report whose STATUS is not `done`, a report that is a symlink (never read) or longer than 100000 bytes (cut), a failed
+verify command, a verify command that ran longer than `--verify-timeout` (default 600 s; it is killed with its child processes), host output that the terminal cut, or uncommitted changes. Verify output is shown as its last 15 lines, at most 4000 bytes. Any of them makes `collect`
 exit 1, so never read a worker's summary without the lines above it.
 
 ## Other commands
@@ -137,7 +137,7 @@ exit 1, so never read a worker's summary without the lines above it.
    cannot see your conversation.
 2. **Read facts before prose.** `verify` and `git` come from the host, the report from the worker.
 3. **Never pass `--dangerously-skip-permissions` or `bypassPermissions`.** Use `acceptEdits` plus a policy.
-4. **One worker per directory at a time.** Give parallel workers their own checkout or worktree, and copy
+4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; two simultaneous `start`s cannot both win). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch so you can retry. `sh` says on stderr when the host's terminal cut the start of the output. Give parallel workers their own checkout or worktree, and copy
    generated files they need (project files, `.env.example`) into it first.
 5. **Paths are the host's, and absolute.** `$HOME` and `~` are not expanded in `DIR`.
 6. **Never type into your own pane.** `send`, `approve`, `deny` and `close` refuse `$REX_BLOCK`.

@@ -10,7 +10,7 @@ State layout:
    "sent": [{"block", "kind": "text"|"key", "value"}]}
 `run --wait -- sh -c CMD` really runs CMD locally; its output is what `capture` returns for that block.
 """
-import json, os, subprocess, sys
+import fcntl, json, os, subprocess, sys
 
 PATH = os.environ["FAKE_REX_STATE"]
 
@@ -24,9 +24,10 @@ def load():
 
 
 def save(st):
-    with open(PATH + ".tmp", "w") as f:
+    tmp = f"{PATH}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f:
         json.dump(st, f)
-    os.replace(PATH + ".tmp", PATH)
+    os.replace(tmp, PATH)
 
 
 def fail(msg):
@@ -56,6 +57,8 @@ def live(st, block):
 
 
 def main():
+    lock = open(PATH + ".lock", "a")  # concurrent rex-crew processes share one fake host
+    fcntl.flock(lock, fcntl.LOCK_EX)
     argv = sys.argv[1:]
     # global option -S HOST is accepted and ignored
     if argv[:1] == ["-S"]:
@@ -104,7 +107,11 @@ def main():
             fail("unsupported block command")
     elif cmd == "capture":
         o, _ = opts(argv[1:], {"-s", "-b"})
-        print(live(st, o["-b"])["output"], end="")
+        out = live(st, o["-b"])["output"]
+        keep = int(os.environ.get("FAKE_REX_KEEP_LINES") or 0)  # a terminal that keeps only its last N lines
+        if keep:
+            out = "\n".join(out.splitlines()[-keep:]) + "\n"
+        print(out, end="")
     elif cmd in ("send", "send-key"):
         o, pos = opts(argv[1:], {"-s", "-b"})
         live(st, o["-b"])
