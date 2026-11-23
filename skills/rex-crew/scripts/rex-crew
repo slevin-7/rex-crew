@@ -28,7 +28,7 @@ If only the user can decide something, ask and wait instead of guessing.
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
-EXIT = {"done": 0, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}
+EXIT = {"done": 0, "unclean": 1, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}
 
 
 def die(msg, code=1):
@@ -168,6 +168,20 @@ def approve_once(rex, block, expect):
 
 # ---- one worker --------------------------------------------------------------------------------------
 
+def trust(rex, run):
+    """Confirm the folder-trust dialog, but only if it names this worker's directory."""
+    squash = lambda t: re.sub(r"\s", "", t)
+    scr = rex.screen(run["block"], 16)
+    if not (run.get("trust") and "trust" in scr.lower() and squash(run["dir"].rstrip("/")) in squash(scr)):
+        return False
+    rex.key(run["block"], "down")  # the default is "No, exit"
+    time.sleep(1)
+    rex.key(run["block"], "enter")
+    run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
+    run["t0"] = time.time()
+    return True
+
+
 def tick(rex, run, policy):
     """Look at one worker once. Returns None while it works, or a result dict when it stops."""
     approve, never = policy
@@ -180,8 +194,10 @@ def tick(rex, run, policy):
     elif state == "error":
         return {"state": "error", "question": rec.get("msg", "")}
     elif state == "blocked":
-        run["seen"] = True
         kind, text = question(rec)
+        if "trust this folder" in text.lower():  # reported as a permission prompt by newer Claude Code
+            return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
+        run["seen"] = True
         if kind == "permission" and routine(text, approve, never) and approve_once(rex, run["block"], text):
             run.setdefault("approved", []).append(text)
             return None
@@ -190,15 +206,7 @@ def tick(rex, run, policy):
         return {"state": "gone"}
     elif age > 15 and not run.get("seen"):
         # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
-        scr = rex.screen(run["block"], 14)
-        if run.get("trust") and "trust" in scr.lower() and run["dir"].rstrip("/") in scr.replace("\n", ""):
-            rex.key(run["block"], "down")
-            time.sleep(1)
-            rex.key(run["block"], "enter")
-            run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
-            run["t0"] = time.time()
-            return None
-        return {"state": "blocked", "kind": "startup", "question": scr}
+        return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
     return None
 
 
@@ -231,19 +239,27 @@ def start(rex, a, agent_args):
 
 def finish(rex, run):
     """What is really on disk: the report file, git, and the verify command's exit status."""
-    d, verify = shlex.quote(run["dir"]), run.get("verify")
-    script = (f"cd {d} || exit 97; echo @@REPORT; base64 < .rex-crew/report-{run['name']}.md 2>/dev/null | tr -d '\\n'; echo; "
-              "echo @@GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"branch $(git branch --show-current 2>/dev/null) · dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
-              "echo @@VERIFY; " + (f"( {verify} ) >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$; rm -f /tmp/rex-crew-verify.$$; echo @@RC $rc" if verify else "echo @@RC none"))
+    d, verify, m = shlex.quote(run["dir"]), run.get("verify"), f"@@{os.urandom(6).hex()}"
+    script = (f"cd {d} || exit 97; echo {m}REPORT; base64 < .rex-crew/report-{run['name']}.md 2>/dev/null | tr -d '\\n'; echo; "
+              f"echo {m}GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"branch $(git branch --show-current 2>/dev/null) · dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
+              f"echo {m}VERIFY; " + (f"( {verify} ) >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$; rm -f /tmp/rex-crew-verify.$$; echo {m}RC $rc" if verify else f"echo {m}RC none"))
     _, out = rex.sh(script)
     part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
     try:
-        report = base64.b64decode(re.sub(r"\s", "", part("@@REPORT", "@@GIT"))).decode("utf-8", "replace").strip()
+        report = base64.b64decode(re.sub(r"\s", "", part(m + "REPORT", m + "GIT"))).decode("utf-8", "replace").strip()
     except ValueError:
         report = ""
-    rc = re.search(r"@@RC (\S+)", out)
-    return {"report": report or "(the worker wrote no report file)", "git": part("@@GIT", "@@VERIFY"),
-            "verify_tail": part("@@VERIFY", "@@RC") if verify else "", "verify_rc": rc.group(1) if rc else "unknown"}
+    rc = re.search(re.escape(m) + r"RC (\S+)", out)
+    res = {"report": report, "git": part(m + "GIT", m + "VERIFY"),
+           "verify_tail": part(m + "VERIFY", m + "RC") if verify else "", "verify_rc": rc.group(1) if rc else "unknown"}
+    # "done" only means the turn ended. Say plainly when the result is not clean.
+    said = re.search(r"^STATUS:\s*(\w+)", report, re.M)
+    res["attention"] = [x for x in (
+        None if report else "the worker wrote no report file",
+        None if not said or said.group(1).lower() == "done" else f"the worker reports STATUS {said.group(1)}",
+        None if res["verify_rc"] in ("0", "none") else f"verify failed (exit {res['verify_rc']})",
+        None if not re.search(r"dirty [1-9]", res["git"]) else "uncommitted changes in the directory") if x]
+    return res
 
 
 def show(run, res):
@@ -255,10 +271,12 @@ def show(run, res):
     if res["state"] in ("blocked", "error"):
         print(f"needs you ({res.get('kind', 'error')}): {res.get('question', '')}")
     if "git" in res:
+        for x in res["attention"]:
+            print(f"ATTENTION: {x}")
         print("git: " + " · ".join(res["git"].splitlines()))
         if res["verify_rc"] != "none":
             print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + res["verify_tail"]))
-        print("report:\n" + res["report"])
+        print("report:\n" + (res["report"] or "(none)"))
 
 
 def collect(rex, policy, timeout, only=None):
@@ -280,6 +298,8 @@ def collect(rex, policy, timeout, only=None):
                 if not r.get("keep"):
                     rex.call("block", "close", "-s", rex.session, r["block"], check=False)
             show(r, res)
+            if res.get("attention"):
+                r["state"] = res["state"] = "unclean"
             ledger_update(r)
             worst = max(worst, EXIT[res["state"]])
         if worst == 2:  # someone waits for the orchestrator: say who is still working and hand back
