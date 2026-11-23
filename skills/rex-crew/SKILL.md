@@ -61,7 +61,7 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 
 `collect` exits 0 when every worker is done, and 2 as soon as one needs you; it names the workers still running.
 Answer, then run `collect` again. Run it in the background when you have other work: you are woken when it exits.
-`checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
+`checkout` accepts a relative repo path (resolved on the host); NAME follows the same rules as for `start`. `checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
 Integrate afterwards yourself, one branch at a time: `"$here/rex-crew" sh 'git -C /abs/repo merge --no-ff crew/api'`,
 then verify the merged result; parallel workers do not know about each other's changes.
 
@@ -113,7 +113,8 @@ Then `collect` again. `needs you (question): ...` shows the question and its opt
 ## What "done" means
 
 `state: done` says the worker's turn ended. `ATTENTION:` lines say when that is not a clean result: no report file,
-a report whose STATUS is not `done`, a failed verify command, or uncommitted changes. Any of them makes `collect`
+a report whose STATUS is not `done`, a report that is a symlink (never read) or longer than 100000 bytes (cut), a failed
+verify command, or uncommitted changes. Verify output is shown as its last 15 lines, at most 4000 bytes. Any of them makes `collect`
 exit 1, so never read a worker's summary without the lines above it.
 
 ## Other commands

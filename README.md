@@ -78,7 +78,7 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 rex-crew status                      # every reporting pane: state and open question
 ```
 
-Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, failed verify,
+Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a symlinked or oversized report, failed verify,
 uncommitted changes), `2` needs you, `3` timeout, `4` error, `5` pane gone.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
