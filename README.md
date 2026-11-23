@@ -62,15 +62,16 @@ Nothing is copied; `install.sh --uninstall` removes the two links. Agents then f
 export REX_CREW_HOST=buildbox
 export REX_CREW_SESSION=$(rex-crew session my-task)     # creates the session on the host if missing
 
-rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [-- CLAUDE_ARGS]
+rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [--preamble F] [--brief] [-- CLAUDE_ARGS]
 
 # several at once: one checkout each, start all, collect
 A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
 rex-crew start api "$A" api.md --verify 'npm test' --trust -- --permission-mode acceptEdits
 rex-crew collect --policy policy.json   # reports each worker as it ends; exits 2 when one needs you
+rex-crew collect --brief                # per worker: header, ATTENTION, git, verify, only CHANGED and OPEN; ends with "3 done, 1 unclean, 1 needs you"
 
 # or from one plan file: all checkouts and workers, or nothing; then merge the branches back
-rex-crew fanout plan.json
+rex-crew fanout plan.json [--preamble F]
 rex-crew integrate /abs/repo api docs --verify 'npm test' [--verify-timeout SEC]
 
 rex-crew approve BLOCK --match RE    # one-time Yes to the open prompt
@@ -95,6 +96,15 @@ rex-crew status                      # every reporting pane: state and open ques
   "workers": [ { "name": "api", "task_file": "api.md" },
                { "name": "docs", "task": "Document the /v2 endpoints in docs/api.md. Do not touch src/." } ] }
 ```
+
+`--preamble FILE` (on `start`, `run`, `fanout`; in a plan: `"preamble": "file.md"`, relative to the plan, the option wins) appends your standing
+instructions to every task, just before the report protocol. The file must exist and not be empty, or nothing is started (exit 2). The protocol itself
+tells workers which read commands pass without waiting (plain `git status`, `grep`, `sed -n`) and which do not (`sh -c`, `<( )`, `$( )`, env prefixes).
+
+`--brief` shortens what `collect` and `run` print and leaves exit codes alone: a section missing from a report is said so
+(`OPEN: (missing from the report ...)`), a long section is cut with a count of the lines left out. The default output is unchanged. A question
+(`needs you`) is followed by the commands that answer it: `approve BLOCK --match '^...\Z'` (presses Yes only if exactly that prompt is still open), `deny`, or `answer`.
+Control characters in a worker's text (ESC, a lone CR) are shown as `?`, and its text cannot start a new line of the output.
 
 `integrate` merges `crew/api`, `crew/docs` into the branch REPO has checked out, one at a time, and prints per branch `merged`, `conflict:` with the
 files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (the worker committed nothing). It stops at the first conflict or

@@ -60,7 +60,14 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 "$here/rex-crew" start api  "$A" api.md  --verify 'npm test' --trust -- --permission-mode acceptEdits
 "$here/rex-crew" start docs "$B" docs.md --trust -- --permission-mode acceptEdits
 "$here/rex-crew" collect --policy policy.json      # prints each report as its worker ends
+"$here/rex-crew" collect --policy policy.json --brief   # the essentials only (also `run --brief`)
 ```
+
+`--brief` prints per worker the header, every `ATTENTION:` line, the git and verify lines and only the report's CHANGED and OPEN sections (capped; a missing
+section is said so, never left out silently), then a tally such as `3 done, 1 unclean, 1 needs you`. Exit codes and the default output are unchanged.
+`--preamble FILE` on `start`, `run` and `fanout` (plan key `"preamble"`, relative to the plan; the option wins) appends your standing instructions to every task
+before the report protocol; a missing or empty file exits 2 before anything starts. The protocol already tells workers that plain reads (`git status`,
+`grep -n`, `sed -n`) pass and `sh -c`, `<( )`, `$( )`, env prefixes and other redirects wait for a human: your policy still decides what passes.
 
 `collect` exits 0 when every worker is done, and 2 as soon as one needs you (2 wins over every other code, also over an error); it names the workers still running.
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
@@ -150,7 +157,9 @@ pass through your policy (`"^(Write|Edit): /abs/dir/"`).
 "$here/rex-crew" answer BLOCK --text 2024         # free text that is only digits (without --text, digits pick that option)
 ```
 
-Then `collect` again. `needs you (question): ...` shows the question and its options.
+Then `collect` again. `needs you (question): ...` shows the question and its options, followed by the exact `approve`/`deny`/`answer` lines to copy
+(with `-S`/`-s` filled in). For a permission prompt the `approve` line carries `--match` for exactly that prompt, so it presses Yes only if the prompt is still the one shown;
+a prompt with control characters or several lines gets no `--match`: read `screen BLOCK` first. Control characters in worker text are printed as `?`.
 
 ## What "done" means
 
