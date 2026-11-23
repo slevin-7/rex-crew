@@ -316,30 +316,85 @@ def opaque(body):
 
 
 def parts(text):
-    """`Bash: a; b | c` -> ['Bash: a', 'Bash: b', 'Bash: c'], splitting only outside quotes."""
+    """`Bash: a; b | c` -> ['Bash: a', 'Bash: b', 'Bash: c'], splitting only outside quotes.
+    One pass in the order a POSIX shell reads: quotes and escapes first, then comments, then operators. An operator
+    counts only outside quotes and when not backslash-escaped. Whatever cannot be read with certainty (a write, a
+    substitution, $'..', an unfinished quote) gives ['Bash: <redirection>'], which no pattern approves."""
     tool, sep, body = text.partition(": ")
     if tool != "Bash" or not sep:
         return [text]
-    try:
-        # 2>&1 and >/dev/null change nothing on disk; every other redirection is a write and is never routine.
-        # Only when nothing is glued to them: `>&2file` and `> /dev/nullx` are writes to a file.
-        body = re.sub(r"(?<!&)\d?>&\d(?![^\s;&|])|(?<!>)\d?>\s*/dev/null(?![^\s;&|])", "", body)
-        # Newline and CR end a command like `;` does, and a `#` comment must not swallow the next line.
-        lex = shlex.shlex(body, posix=True, punctuation_chars=";&|<>\r\n")
-        lex.whitespace, lex.commenters = " \t", ""
-        lex.whitespace_split = True
-        out, cur = [], []
-        for tok in lex:
-            if tok and set(tok) <= set(";&|<>\r\n") and set(tok) & set("<>"):
-                return ["Bash: <redirection>"]  # also `&>`, `>&`, `|&>`, `<(`
-            if tok and set(tok) <= set(";&|\r\n"):
-                out.append(cur); cur = []
+    refuse = ["Bash: <redirection>"]
+    # 2>&1 and >/dev/null change nothing on disk; every other redirection is a write and is never routine.
+    # Only when nothing is glued to them: `>&2file` and `> /dev/nullx` are writes to a file.
+    harmless = re.compile(r"(?<![&>])>(?:&\d|[ \t]*/dev/null)(?![^\s;&|])")
+    out, cur, word, has, quote, i, n = [], [], [], False, None, 0, len(body)
+    def end_word():
+        nonlocal word, has
+        if word or has:
+            cur.append("".join(word))
+        word, has = [], False
+    while i < n:
+        c, two = body[i], body[i:i + 2]
+        if quote == "'":
+            if c == "'":
+                quote = None
             else:
-                cur.append(tok)
+                word.append(c)
+        elif quote == '"':
+            if c == '"':
+                quote = None
+            elif c == "\\" and two[1:] and two[1] in "$`\"\\\n":
+                i += 1
+                if body[i] != "\n":  # backslash-newline is a line continuation
+                    word.append(body[i])
+            elif c == "`" or two == "$(":
+                return refuse
+            else:
+                word.append(c)
+        elif c == "\\":
+            if two[1:] == "\n":
+                i += 1
+            else:
+                word.append(body[i + 1] if two[1:] else c)
+                has = True
+                i += 1 if two[1:] else 0
+        elif c in "'\"":
+            quote, has = c, True
+        elif c == "`" or two in ("$(", "$'", '$"'):
+            return refuse  # a substitution, or ANSI-C quoting whose \' does not end the quote
+        elif c in " \t":
+            end_word()
+        elif c == "#" and not word and not has:
+            while i < n and body[i] != "\n":  # a comment ends at the newline; a quote inside it opens nothing
+                if body[i] == "`" or body[i:i + 2] == "$(":
+                    return refuse
+                i += 1
+            continue
+        elif c in ";&|\r\n":
+            if two == "&>":
+                return refuse
+            end_word()
+            if cur:
+                out.append(cur)
+            cur = []
+        elif c in "<>":
+            m = harmless.match(body, i) if c == ">" else None
+            if not m:
+                return refuse  # also `&>`, `>&`, `<<<`, `<(`
+            if word and "".join(word).isdigit() and not has:
+                word = []  # the 2 of 2>&1 is a file descriptor, not an argument
+            end_word()
+            i = m.end()
+            continue
+        else:
+            word.append(c)
+        i += 1
+    if quote:
+        return refuse  # an unfinished quote: the shell would wait for more, and what follows is not ours to read
+    end_word()
+    if cur:
         out.append(cur)
-    except ValueError:
-        return [text]  # unbalanced quotes: treat as one command, which no pattern should approve
-    return [f"Bash: {' '.join(c)}" for c in out if c]
+    return [f"Bash: {' '.join(c)}" for c in out]
 
 
 def routine(text, approve, never):
@@ -349,9 +404,10 @@ def routine(text, approve, never):
     ps = parts(text)
     # `never` also sees the command as the shell will read it: `~/.s''sh` is `~/.ssh`.
     # Command substitution runs something no pattern has seen, so it is never routine.
-    if "`" in text or "$(" in text or any(r.search(p) for r in never for p in ps):
-        return False
+    # (For Bash, parts() has looked for them outside single quotes and escapes.)
     tool, _, body = text.partition(": ")
+    if (tool != "Bash" and ("`" in text or "$(" in text)) or any(r.search(p) for r in never for p in ps):
+        return False
     if tool == "Bash":
         # `cd /etc` then a relative `cat hosts`: the directory itself must pass `never` as a directory.
         if opaque(body) or any(r.search(p + "/") for r in never for p in ps if re.match(r"Bash: (cd|pushd)(\s|$)", p)):
