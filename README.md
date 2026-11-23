@@ -10,7 +10,7 @@ rex-crew -S buildbox -s "$SESSION" run fix-retry /Users/me/code/app task.md \
 ```
 
 ```text
-state: done   184s
+== fix-retry   state: done   184s
 auto-approved (3): Bash: git status | Bash: npm test | Bash: git commit -m ...
 git: 4be2c1a retry: back off on 429 · dirty 0
 verify: exit 0
@@ -63,14 +63,21 @@ export REX_CREW_HOST=buildbox
 export REX_CREW_SESSION=$(rex-crew session my-task)     # creates the session on the host if missing
 
 rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--trust] [--keep] [-- CLAUDE_ARGS]
-rex-crew status                      # every worker: state and open question
+
+# several at once: one checkout each, start all, collect
+A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
+rex-crew start api "$A" api.md --verify 'npm test' --trust -- --permission-mode acceptEdits
+rex-crew collect --policy policy.json   # reports each worker as it ends; exits 2 when one needs you
+
 rex-crew approve BLOCK --match RE    # one-time Yes to the open prompt
 rex-crew deny BLOCK
 rex-crew send BLOCK "text"           # refused unless the worker is at its prompt
-rex-crew run NAME /abs/dir - --block BLOCK ...   # resume after answering
+rex-crew sh 'git -C /abs/repo log --oneline -3'   # any shell command on the host
+rex-crew runs                        # ledger of started workers, kept on disk across conversations
+rex-crew status                      # every reporting pane: state and open question
 ```
 
-Exit status of `run` and `wait`: `0` done, `2` needs you, `3` timeout, `4` error, `5` pane gone.
+Exit status of `run` and `collect`: `0` done, `2` needs you, `3` timeout, `4` error, `5` pane gone.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
 ## Policy
@@ -87,7 +94,7 @@ not a sandbox: a pattern that is too wide approves too much.
 ## Limits
 
 - Claude Code only. Other agents' dialogs are not answered; their questions still come back to you.
-- One turn per `run`. A worker that needs several rounds is resumed with `--block`.
+- A chained command is answered for you only if every part is approved; output redirection into a file never is.
 - Workers do not message each other. The orchestrator passes results on, usually as the next task's input.
 - Every host step opens and closes a short-lived tab named `crew-sh`.
 

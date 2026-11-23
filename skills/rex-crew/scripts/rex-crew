@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """rex-crew: let one planning agent run Claude Code workers in Rex panes, here or on another Rex host.
 
-One call (`run`) puts a task on the host, starts a worker, waits on its own program status,
-answers routine permission prompts from a policy file, hands every other question back to you,
-and returns the worker's written report plus what is actually on disk (git, a verify command).
-Standard library only. See README.md.
+`start` puts a task on the host and starts a worker; `collect` waits on the workers' own program
+status, answers routine permission prompts from a policy file, hands every other question back to
+you, and returns each worker's written report plus what is actually on disk (git, a verify command).
+`run` is both for a single task. Standard library only. See README.md.
 """
 import argparse, base64, json, os, re, shlex, subprocess, sys, time
 
@@ -22,11 +22,13 @@ COMMIT: hash and subject, or "none"
 OPEN: anything unfinished, risky, or decided on your own
 NEXT: one suggestion for a follow-up
 
-Rules: do not rename the Rex session, do not push, do not chain shell commands with && or ;.
+Rules: do not rename the Rex session, do not push, run one shell command per call.
 If only the user can decide something, ask and wait instead of guessing.
 """
 
 SELF = os.environ.get("REX_BLOCK", "")
+LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
+EXIT = {"done": 0, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}
 
 
 def die(msg, code=1):
@@ -76,6 +78,30 @@ class Rex:
         self.call("block", "close", "-s", self.session, block, check=False)
         return p.returncode, out
 
+
+# ---- ledger: what was started, so a later call (or a later session) can pick it up -----------------
+
+def ledger_load():
+    try:
+        with open(LEDGER) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return []
+
+
+def ledger_update(run):
+    runs = [r for r in ledger_load() if r["id"] != run["id"]] + [run]
+    os.makedirs(os.path.dirname(LEDGER), exist_ok=True)
+    with open(LEDGER + ".tmp", "w") as f:
+        json.dump(runs[-300:], f, indent=1)
+    os.replace(LEDGER + ".tmp", LEDGER)
+
+
+def mine(rex, states=("open", "blocked", "timeout")):
+    return [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session and r["state"] in states]
+
+
+# ---- prompts and policy -----------------------------------------------------------------------------
 
 def guard(block):
     if block == SELF:
@@ -140,120 +166,173 @@ def approve_once(rex, block, expect):
     return True
 
 
-def wait(rex, block, timeout, policy, trust_dir=None):
-    """Block until the worker's turn ends or it needs a person. Returns a result dict."""
+# ---- one worker --------------------------------------------------------------------------------------
+
+def tick(rex, run, policy):
+    """Look at one worker once. Returns None while it works, or a result dict when it stops."""
     approve, never = policy
-    start, seen_work, approved = time.time(), False, []
-    while time.time() - start < timeout:
-        rec = rex.status(block)
-        state = rec.get("state", "none")
-        if state == "working":
-            seen_work = True
-        elif state in ("done", "idle") and (seen_work or time.time() - start > 30):
-            return {"state": "done", "approved": approved}
-        elif state == "error":
-            return {"state": "error", "question": rec.get("msg", ""), "approved": approved}
-        elif state == "blocked":
-            kind, text = question(rec)
-            if kind == "permission" and routine(text, approve, never) and approve_once(rex, block, text):
-                approved.append(text)
-                time.sleep(2)
-                continue
-            return {"state": "blocked", "kind": kind, "question": text, "approved": approved}
-        elif state == "gone":
-            return {"state": "gone", "approved": approved}
-        elif time.time() - start > 15:
-            # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
-            scr = rex.screen(block, 14)
-            if trust_dir and "trust" in scr.lower() and trust_dir.rstrip("/") in scr.replace("\n", ""):
-                rex.key(block, "down")
-                time.sleep(1)
-                rex.key(block, "enter")
-                approved.append(f"folder trust: {trust_dir}")
-                start = time.time()
-                continue
-            return {"state": "blocked", "kind": "startup", "question": scr, "approved": approved}
-        time.sleep(4)
-    return {"state": "timeout", "approved": approved}
+    rec = rex.status(run["block"])
+    state, age = rec.get("state", "none"), time.time() - run["t0"]
+    if state == "working":
+        run["seen"] = True
+    elif state in ("done", "idle") and (run.get("seen") or age > 30):
+        return {"state": "done"}
+    elif state == "error":
+        return {"state": "error", "question": rec.get("msg", "")}
+    elif state == "blocked":
+        run["seen"] = True
+        kind, text = question(rec)
+        if kind == "permission" and routine(text, approve, never) and approve_once(rex, run["block"], text):
+            run.setdefault("approved", []).append(text)
+            return None
+        return {"state": "blocked", "kind": kind, "question": text}
+    elif state == "gone":
+        return {"state": "gone"}
+    elif age > 15 and not run.get("seen"):
+        # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
+        scr = rex.screen(run["block"], 14)
+        if run.get("trust") and "trust" in scr.lower() and run["dir"].rstrip("/") in scr.replace("\n", ""):
+            rex.key(run["block"], "down")
+            time.sleep(1)
+            rex.key(run["block"], "enter")
+            run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
+            run["t0"] = time.time()
+            return None
+        return {"state": "blocked", "kind": "startup", "question": scr}
+    return None
 
 
-def start(rex, name, directory, prompt, agent_args):
-    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name):
+def start(rex, a, agent_args):
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", a.name):
         die("NAME must be lowercase a-z0-9_- and at most 32 characters", 2)
+    busy = [r for r in mine(rex) if r["dir"].rstrip("/") == a.dir.rstrip("/")]
+    if busy:
+        die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
+    task = sys.stdin.read() if a.task == "-" else open(os.path.expanduser(a.task)).read()
+    task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md")
+    b64, d = base64.b64encode(task.encode()).decode(), shlex.quote(a.dir)
+    # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
+    _, out = rex.sh(f"cd {d} || exit 97; mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md && "
+                    f"echo {b64} | base64 -d > .rex-crew/task-{a.name}.md && "
+                    "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; echo @@PUT ok")
+    if "@@PUT ok" not in out:
+        die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
+    prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
     # The prompt goes first: --allowedTools is variadic and would swallow it.
-    line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd " + shlex.quote(directory)
-            + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(a) for a in agent_args))
-    p = rex.call("run", "-s", rex.session, "--label", name, "--keep-open", "--focus=false", "--json",
-                 "--", "sh", "-c", line)
-    return json.loads(p.stdout)["block_ids"][0]
+    line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd " + d
+            + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
+    p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
+    run = {"id": f"{int(time.time())}-{a.name}", "name": a.name, "dir": a.dir, "host": rex.host or "", "session": rex.session,
+           "block": json.loads(p.stdout)["block_ids"][0], "verify": a.verify, "trust": a.trust, "keep": a.keep,
+           "state": "open", "t0": time.time(), "started": time.strftime("%Y-%m-%d %H:%M")}
+    ledger_update(run)
+    return run
 
 
-def finish(rex, name, directory, verify):
+def finish(rex, run):
     """What is really on disk: the report file, git, and the verify command's exit status."""
-    d = shlex.quote(directory)
-    script = (f"cd {d} || exit 97; echo @@REPORT; base64 < .rex-crew/report-{name}.md 2>/dev/null | tr -d '\\n'; echo; "
-              "echo @@GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
+    d, verify = shlex.quote(run["dir"]), run.get("verify")
+    script = (f"cd {d} || exit 97; echo @@REPORT; base64 < .rex-crew/report-{run['name']}.md 2>/dev/null | tr -d '\\n'; echo; "
+              "echo @@GIT; git log -1 --format='%h %s' 2>/dev/null; echo \"branch $(git branch --show-current 2>/dev/null) · dirty $(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')\"; "
               "echo @@VERIFY; " + (f"( {verify} ) >/tmp/rex-crew-verify.$$ 2>&1; rc=$?; tail -n 15 /tmp/rex-crew-verify.$$; rm -f /tmp/rex-crew-verify.$$; echo @@RC $rc" if verify else "echo @@RC none"))
     _, out = rex.sh(script)
-    part = lambda a, b: out.split(a, 1)[-1].split(b, 1)[0].strip() if a in out else ""
+    part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
     try:
         report = base64.b64decode(re.sub(r"\s", "", part("@@REPORT", "@@GIT"))).decode("utf-8", "replace").strip()
     except ValueError:
         report = ""
     rc = re.search(r"@@RC (\S+)", out)
     return {"report": report or "(the worker wrote no report file)", "git": part("@@GIT", "@@VERIFY"),
-            "verify_tail": part("@@VERIFY", "@@RC") if verify else "", "verify": rc.group(1) if rc else "unknown"}
+            "verify_tail": part("@@VERIFY", "@@RC") if verify else "", "verify_rc": rc.group(1) if rc else "unknown"}
 
 
-def show(res):
+def show(run, res):
     """Compact, stable text for the orchestrator: facts first, the worker's words last."""
-    print(f"state: {res['state']}" + (f"   block: {res['block']}" if res.get("block") else "")
-          + (f"   {res['seconds']}s" if "seconds" in res else ""))
-    if res.get("approved"):
-        print(f"auto-approved ({len(res['approved'])}): " + " | ".join(a[:70] for a in res["approved"][:6]))
+    print(f"== {run['name']}   state: {res['state']}   {int(time.time() - run['t0'])}s"
+          + ("" if res["state"] == "done" and not run.get("keep") else f"   block: {run['block']}"))
+    if run.get("approved"):
+        print(f"auto-approved ({len(run['approved'])}): " + " | ".join(x[:60] for x in run["approved"][-5:]))
     if res["state"] in ("blocked", "error"):
         print(f"needs you ({res.get('kind', 'error')}): {res.get('question', '')}")
     if "git" in res:
         print("git: " + " · ".join(res["git"].splitlines()))
-        if res["verify"] != "none":
-            print(f"verify: exit {res['verify']}" + ("" if res["verify"] == "0" else "\n" + res["verify_tail"]))
+        if res["verify_rc"] != "none":
+            print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + res["verify_tail"]))
         print("report:\n" + res["report"])
 
 
+def collect(rex, policy, timeout, only=None):
+    """Watch every open worker of this session. Returns when all are done, or one needs a person."""
+    runs = [r for r in mine(rex) if not only or r["name"] == only]
+    if not runs:
+        print("no open workers in this session")
+        return 0
+    t0, worst = time.time(), 0
+    while runs and time.time() - t0 < timeout:
+        for r in list(runs):
+            res = tick(rex, r, policy)
+            if not res:
+                continue
+            runs.remove(r)
+            r["state"] = res["state"]
+            if res["state"] == "done":
+                res.update(finish(rex, r))
+                if not r.get("keep"):
+                    rex.call("block", "close", "-s", rex.session, r["block"], check=False)
+            show(r, res)
+            ledger_update(r)
+            worst = max(worst, EXIT[res["state"]])
+        if worst == 2:  # someone waits for the orchestrator: say who is still working and hand back
+            break
+        if runs:
+            time.sleep(4)
+    for r in runs:
+        ledger_update(r)
+    if runs:
+        print("still working: " + ", ".join(r["name"] for r in runs))
+        worst = worst or 3  # a question (2) outranks "others still working" (3)
+    return worst
+
+
+# ---- commands ----------------------------------------------------------------------------------------
+
+def cmd_start(rex, a):
+    run = start(rex, a, a.agent_args)
+    print(f"started {run['name']}   block: {run['block']}   dir: {run['dir']}")
+
+
 def cmd_run(rex, a):
-    policy = load_policy(a.policy)
-    if a.block:
-        block = a.block
-    else:
-        task = sys.stdin.read() if a.task == "-" else open(os.path.expanduser(a.task)).read()
-        task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md")
-        b64 = base64.b64encode(task.encode()).decode()
-        d = shlex.quote(a.dir)
-        # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
-        rc, out = rex.sh(f"cd {d} || exit 97; mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md && "
-                         f"echo {b64} | base64 -d > .rex-crew/task-{a.name}.md && "
-                         "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; echo @@PUT ok")
-        if "@@PUT ok" not in out:
-            die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
-        block = start(rex, a.name, a.dir, f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely.", a.agent_args)
-    t0 = time.time()
-    res = wait(rex, block, a.timeout, policy, a.dir if a.trust else None)
-    res.update(block=block, seconds=int(time.time() - t0))
-    if res["state"] == "done":
-        res.update(finish(rex, a.name, a.dir, a.verify))
-        if not a.keep:
-            rex.call("block", "close", "-s", rex.session, block, check=False)
-            res.pop("block")
-    show(res)
-    sys.exit({"done": 0, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}[res["state"]])
+    run = start(rex, a, a.agent_args)
+    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=run["name"]))
 
 
-def cmd_wait(rex, a):
-    guard(a.block)
-    res = wait(rex, a.block, a.timeout, load_policy(a.policy))
-    res["block"] = a.block
-    show(res)
-    sys.exit({"done": 0, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}[res["state"]])
+def cmd_collect(rex, a):
+    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name))
+
+
+def cmd_runs(rex, a):
+    for r in ledger_load()[-(a.last or 20):]:
+        if a.all or (r["host"] == (rex.host or "") and r["session"] == rex.session):
+            print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
+                             "" if r["state"] in ("done", "closed", "gone") else r["block"]]))
+
+
+def cmd_checkout(rex, a):
+    """A git worktree per worker, on its own branch, with the generated files it needs copied in."""
+    repo, name = a.repo.rstrip("/"), a.name
+    wt = f"{os.path.dirname(repo)}/.rex-crew-worktrees/{os.path.basename(repo)}/{name}"
+    copies = "".join(f" && cp -R {shlex.quote(repo + '/' + c)} {shlex.quote(wt + '/' + c)}" for c in a.copy)
+    rc, out = rex.sh(f"cd {shlex.quote(repo)} && git worktree add -q -b {shlex.quote(a.branch or 'crew/' + name)} "
+                     f"{shlex.quote(wt)} {shlex.quote(a.base)}{copies} && echo @@WT ok")
+    if "@@WT ok" not in out:
+        die(f"checkout failed: {out.strip()[-300:]}")
+    print(wt)
+
+
+def cmd_sh(rex, a):
+    rc, out = rex.sh(" ".join(a.command))
+    print(out.rstrip())
+    sys.exit(rc)
 
 
 def cmd_send(rex, a):
@@ -264,6 +343,10 @@ def cmd_send(rex, a):
     rex.type(a.block, " ".join(a.text))
     time.sleep(1)  # let the TUI draw the text before Return
     rex.key(a.block, "enter")
+    for r in mine(rex, ("open", "blocked", "timeout", "done")):
+        if r["block"] == a.block:  # a new turn: collect should wait for it again
+            r.update(state="open", t0=time.time(), seen=False)
+            ledger_update(r)
 
 
 def cmd_approve(rex, a):
@@ -273,7 +356,7 @@ def cmd_approve(rex, a):
         die(f"the open prompt does not match: {text}", 7)
     if not approve_once(rex, a.block, text):
         die("no permission prompt open, or not a Claude Code pane", 6)
-    print(f"approved once: {text}")
+    print(f"approved once: {text[:200]}")
 
 
 def cmd_deny(rex, a):
@@ -293,6 +376,15 @@ def cmd_status(rex, a):
         print("\t".join([rec.get("state", "-"), b.get("label", "-"), b["block_id"], (kind + " " + text).strip()[:100]]))
 
 
+def cmd_close(rex, a):
+    guard(a.block)
+    rex.call("block", "close", "-s", rex.session, a.block)
+    for r in mine(rex):
+        if r["block"] == a.block:
+            r["state"] = "closed"
+            ledger_update(r)
+
+
 def cmd_session(rex, a):
     sessions = json.loads(rex.call("ls", "--json").stdout).get("sessions", [])
     hit = [s["session_id"] for s in sessions if s.get("label") == a.label]
@@ -300,16 +392,16 @@ def cmd_session(rex, a):
 
 
 def selftest():
-    ap, nv = [re.compile(r"^Bash: (rtk )?git (status|log)\b")], [re.compile(r"\brm\b|git push")]
+    ap, nv = [re.compile(r"^Bash: (rtk )?(git (status|log)|make test|tail|head|grep)\b")], [re.compile(r"\brm\b|git push")]
     assert routine("Bash: git status --short", ap, nv)
     assert routine("Bash: rtk git log -1", ap, nv)
     assert not routine("Bash: git status; rm -rf x", ap, nv)
     assert not routine("Bash: git push", ap, nv) and not routine("", ap, nv)
     assert routine("Bash: git status; rtk git log -3", ap, nv)
     assert not routine("Bash: git status; whoami", ap, nv)
-    assert parts("Bash: make test 2>&1 | tail -3") == ["Bash: make test", "Bash: tail -3"]
     assert routine("Bash: git log -1 --format='<%ae>' 2>/dev/null", ap, nv)
     assert not routine("Bash: git log > /etc/hosts", ap, nv)
+    assert parts("Bash: make test 2>&1 | tail -3") == ["Bash: make test", "Bash: tail -3"]
     assert parts('Bash: grep "a|b" f | head') == ["Bash: grep a|b f", "Bash: head"]
     assert question({"kind": "permission", "msg": "hook failed · approve Bash: ls"}) == ("permission", "Bash: ls")
     assert question({}) == ("", "")
@@ -328,21 +420,28 @@ def main():
     p.add_argument("-s", "--session", default=os.environ.get("REX_CREW_SESSION"), help="session id on that host")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", help="task in, report out: start a worker, wait, answer routine prompts, verify")
-    r.add_argument("name"); r.add_argument("dir"); r.add_argument("task", help="task file, or - for stdin")
-    r.add_argument("--policy", help="JSON file: {approve: [regex], never: [regex]}")
-    r.add_argument("--verify", help="shell command run in DIR on the host afterwards; its exit status is reported")
-    r.add_argument("--timeout", type=int, default=900)
-    r.add_argument("--trust", action="store_true", help="confirm the folder-trust dialog if it names DIR")
-    r.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
-    r.add_argument("--block", help="resume a worker you answered by hand instead of starting one")
-    r.set_defaults(fn=cmd_run)
+    def task_args(q):
+        q.add_argument("name"); q.add_argument("dir"); q.add_argument("task", help="task file, or - for stdin")
+        q.add_argument("--verify", help="shell command run in DIR on the host afterwards; its exit status is reported")
+        q.add_argument("--trust", action="store_true", help="confirm the folder-trust dialog if it names DIR")
+        q.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
 
-    w = sub.add_parser("wait", help="wait for a worker's turn; exit 0 done, 2 needs you, 3 timeout")
-    w.add_argument("block"); w.add_argument("--policy"); w.add_argument("--timeout", type=int, default=600)
-    w.set_defaults(fn=cmd_wait)
-    s = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
-    s.add_argument("block"); s.add_argument("text", nargs="+"); s.set_defaults(fn=cmd_send)
+    r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it")
+    task_args(r); r.add_argument("--policy"); r.add_argument("--timeout", type=int, default=900); r.set_defaults(fn=cmd_run)
+    s = sub.add_parser("start", help="put a task on the host and start a worker; returns at once")
+    task_args(s); s.set_defaults(fn=cmd_start)
+    c = sub.add_parser("collect", help="wait for the open workers: answer routine prompts, report each as it ends; exit 2 when one needs you")
+    c.add_argument("name", nargs="?", help="only this worker"); c.add_argument("--policy", help="JSON: {approve: [regex], never: [regex]}")
+    c.add_argument("--timeout", type=int, default=900); c.set_defaults(fn=cmd_collect)
+    ru = sub.add_parser("runs", help="what was started in this session (ledger), newest last")
+    ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int); ru.set_defaults(fn=cmd_runs)
+    co = sub.add_parser("checkout", help="git worktree for one worker on its own branch; prints its path")
+    co.add_argument("name"); co.add_argument("repo"); co.add_argument("--base", default="HEAD"); co.add_argument("--branch")
+    co.add_argument("--copy", action="append", default=[], help="untracked file or folder to copy in (repeatable)"); co.set_defaults(fn=cmd_checkout)
+    sh = sub.add_parser("sh", help="run one shell command on the host and print its output")
+    sh.add_argument("command", nargs="+"); sh.set_defaults(fn=cmd_sh)
+    se = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
+    se.add_argument("block"); se.add_argument("text", nargs="+"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
     ap.add_argument("block"); ap.add_argument("--match", help="only if the prompt matches this regex"); ap.set_defaults(fn=cmd_approve)
     dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
@@ -351,10 +450,9 @@ def main():
     sc.set_defaults(fn=lambda rex, a: print(rex.screen(a.block, a.lines)))
     st = sub.add_parser("status", help="every reporting pane in the session: state, label, block, open question")
     st.add_argument("--all", action="store_true"); st.set_defaults(fn=cmd_status)
-    cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block")
-    cl.set_defaults(fn=lambda rex, a: (guard(a.block), rex.call("block", "close", "-s", rex.session, a.block)))
-    se = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
-    se.add_argument("label"); se.set_defaults(fn=cmd_session)
+    cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.set_defaults(fn=cmd_close)
+    ss = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
+    ss.add_argument("label"); ss.set_defaults(fn=cmd_session)
 
     a = p.parse_args(argv)
     a.agent_args = agent_args

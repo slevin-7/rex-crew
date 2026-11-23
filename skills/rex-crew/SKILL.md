@@ -21,11 +21,11 @@ export REX_CREW_SESSION=$("$here/rex-crew" session my-task)    # a session on th
   -- --permission-mode acceptEdits
 ```
 
-`run` puts `task.md` (or `-` for stdin) on the host, appends the report protocol, starts Claude Code in a new
+`run` is `start` plus `collect` for one worker. It puts `task.md` (or `-` for stdin) on the host, appends the report protocol, starts Claude Code in a new
 tab with the task as its first prompt, and waits. Its output is all you need to read:
 
 ```text
-state: done   184s
+== fix-retry   state: done   184s
 auto-approved (3): Bash: git status | Bash: npm test | Bash: git commit -m ...
 git: 4be2c1a retry: back off on 429 · dirty 0
 verify: exit 0
@@ -42,9 +42,30 @@ NEXT: surface the retry count in the logs
 |---|---|---|
 | 0 | `done` | Read `verify` and `git` before the report: the worker's words are not proof. |
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
-| 3 | `timeout` | Still working. `run ... --block BLOCK` waits again. |
+| 3 | `timeout` | Still working. `collect` waits again. |
 | 4 | `error` | The worker reported an error; `screen BLOCK` shows it. |
 | 5 | `gone` | The pane is closed. |
+
+## Several workers at once
+
+One worker per directory. Give each its own checkout, start them all, then collect:
+
+```sh
+A=$("$here/rex-crew" checkout api  /abs/repo --copy .env.example)   # git worktree on branch crew/api; prints its path
+B=$("$here/rex-crew" checkout docs /abs/repo)
+"$here/rex-crew" start api  "$A" api.md  --verify 'npm test' --trust -- --permission-mode acceptEdits
+"$here/rex-crew" start docs "$B" docs.md --trust -- --permission-mode acceptEdits
+"$here/rex-crew" collect --policy policy.json      # prints each report as its worker ends
+```
+
+`collect` exits 0 when every worker is done, and 2 as soon as one needs you; it names the workers still running.
+Answer, then run `collect` again. Run it in the background when you have other work: you are woken when it exits.
+`checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
+Integrate afterwards yourself, one branch at a time: `"$here/rex-crew" sh 'git -C /abs/repo merge --no-ff crew/api'`,
+then verify the merged result; parallel workers do not know about each other's changes.
+
+`"$here/rex-crew" runs` lists what was started in this session, with state and block. It is kept on disk, so a new
+conversation can pick up open workers: read it first when you resume orchestration.
 
 ## When a worker needs you
 
@@ -52,7 +73,7 @@ NEXT: surface the retry count in the logs
 "$here/rex-crew" approve BLOCK --match 'docker compose up'   # one-time Yes, only if the prompt still matches
 "$here/rex-crew" deny BLOCK                                  # Escape; then `send` what to do instead
 "$here/rex-crew" send BLOCK "Use the staging database."      # only when the worker is at its prompt
-"$here/rex-crew" run NAME DIR - --block BLOCK --policy policy.json --verify '...'   # resume: wait, verify, report
+"$here/rex-crew" collect --policy policy.json               # then wait again: verify and report as before
 ```
 
 Approve only what the user's request covers. Deleting, pushing, credentials, anything outside the task
@@ -79,7 +100,8 @@ Without `--policy`, nothing is answered for you. Start from `policy.example.json
 | Command | |
 |---|---|
 | `status [--all]` | Every reporting pane: state, label, block, open question. |
-| `wait BLOCK [--policy F] [--timeout S]` | Wait for one turn without the report step. |
+| `sh COMMAND` | Run one shell command on the host and print its output: git, a build, a look at a file. |
+| `runs [--all]` | The ledger: workers started in this session, their state and block. |
 | `screen BLOCK [LINES]` | The visible end of a pane. Agents draw on the alternate screen, so there is no scrollback: long answers belong in the report file. |
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
