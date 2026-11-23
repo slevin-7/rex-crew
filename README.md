@@ -97,7 +97,10 @@ for a NAME it has never started. A pane counts as gone only after two failed sta
 
 Patterns are matched against the prompt as the agent reports it, such as `Bash: git status`. `never` wins.
 [`policy.example.json`](policy.example.json) is a starting point. This is a convenience for routine prompts,
-not a sandbox: a pattern that is too wide approves too much.
+not a sandbox: a pattern that is too wide approves too much. `approve` patterns are matched from the start of the prompt (write `^`
+anyway). A policy file that is missing, not JSON, of the wrong shape or has an invalid pattern stops `run` and `collect` with a clear error
+(exit 2) naming the file and the pattern; `run` checks it before it starts the worker. Never answered for you: `Write:`/`Edit:` paths with
+`..` or a line break, and Bash text that uses `$VAR`, brace lists, or a glob in a hidden or directory segment (`~/.s?h/`, `/e?c/`).
 
 ## Limits
 
