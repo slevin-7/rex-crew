@@ -60,8 +60,10 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 "$here/rex-crew" collect --policy policy.json      # prints each report as its worker ends
 ```
 
-`collect` exits 0 when every worker is done, and 2 as soon as one needs you; it names the workers still running.
-Answer, then run `collect` again. Run it in the background when you have other work: you are woken when it exits.
+`collect` exits 0 when every worker is done, and 2 as soon as one needs you (2 wins over every other code, also over an error); it names the workers still running.
+Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
+answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again.
+An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
 `checkout` accepts a relative repo path (resolved on the host); NAME follows the same rules as for `start`. `checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
 Integrate afterwards yourself, one branch at a time: `"$here/rex-crew" sh 'git -C /abs/repo merge --no-ff crew/api'`,
 then verify the merged result; parallel workers do not know about each other's changes.

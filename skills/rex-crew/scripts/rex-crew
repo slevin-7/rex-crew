@@ -146,8 +146,13 @@ def ledger_lock():
         f.close()
 
 
-def ledger_update(run):
+def ledger_update(run, base=None):
+    """Write one run. With `base` (its (state, t0) when it was read), a state that another process changed since
+    (close, send, answer) is kept: only the fields that process does not own are taken from `run`."""
     with ledger_lock():
+        old = [r for r in ledger_raw() if isinstance(r, dict) and r.get("id") == run["id"]]
+        if base and old and (old[0].get("state"), old[0].get("t0")) != base:
+            run = {**run, "state": old[0].get("state"), "t0": old[0].get("t0"), "seen": old[0].get("seen", False)}
         runs = [r for r in ledger_raw() if not (isinstance(r, dict) and r.get("id") == run["id"])] + [run]
         while len(runs) > 300:  # the cap drops the oldest finished entry, never a live worker
             i = next((i for i, r in enumerate(runs) if not (isinstance(r, dict) and r.get("state") in LIVE)), None)
@@ -263,14 +268,20 @@ def tick(rex, run, policy):
     state, age = rec.get("state", "none"), time.time() - run["t0"]
     if state != "blocked":
         run.pop("press", None)
+    if state != "idle":
+        run.pop("idle", None)
     if state == "gone":  # one failed status call is not a vanished pane: ask again on the next pass
         run["gone"] = run.get("gone", 0) + 1
         return {"state": "gone"} if run["gone"] >= 2 else None
     run.pop("gone", None)
     if state == "working":
         run["seen"] = True
-    elif state in ("done", "idle") and (run.get("seen") or age > 30):
+    elif state == "done" and (run.get("seen") or age > 30):
         return {"state": "done"}
+    elif state == "idle" and (run.get("seen") or age > 30):
+        run["idle"] = run.get("idle", 0) + 1  # idle for one look can be the gap between two turns: see it twice
+        if run["idle"] >= 2:
+            return {"state": "done"}
     elif state == "error":
         return {"state": "error", "question": rec.get("msg", "")}
     elif state == "blocked":
@@ -402,34 +413,66 @@ def collect(rex, policy, timeout, only=None):
         print("no open workers in this session")
         return 0
     t0, worst, asked, first = time.time(), 0, False, True
-    while runs and (first or time.time() - t0 < timeout):  # always look once, even with --timeout 0
-        first = False
-        for r in list(runs):
-            res = tick(rex, r, policy)
+    base = {r["id"]: (r["state"], r.get("t0")) for r in runs}
+    pressed = 0  # keys we pressed for workers so far
+
+    def one(r):
+        """Look at one worker; a host failure on it is reported and must not cost the others their results."""
+        nonlocal worst, asked, pressed
+        try:
+            n = len(r.get("approved", []))
+            try:
+                res = tick(rex, r, policy)
+            finally:
+                pressed += max(0, len(r.get("approved", [])) - n)
             if not res:
-                continue
+                return
             runs.remove(r)
             r["state"] = res["state"]
             if res["state"] == "done":
                 res.update(finish(rex, r))
+                if res.get("attention"):  # decided before anything is printed: show() must say what counts
+                    r["state"] = res["state"] = "unclean"
                 if not r.get("keep"):
                     rex.call("block", "close", "-s", rex.session, r["block"], check=False)
-            show(r, res)
-            if res.get("attention"):
-                r["state"] = res["state"] = "unclean"
-            ledger_update(r)
-            worst = max(worst, EXIT[res["state"]])
-            asked = asked or res["state"] == "blocked"
-        if asked:  # someone waits for the orchestrator: say who is still working and hand back
+        except SystemExit:  # die() already said why on stderr
+            if r in runs:
+                runs.remove(r)
+            r["state"] = "open"  # not read yet: the next collect picks it up again
+            print(f"== {r['name']}   state: error   block: {r['block']}\nneeds you (host): could not read this worker's state or result "
+                  f"(see the message above); run collect {r['name']} again")
+            ledger_update(r, base.get(r["id"]))
+            worst = max(worst, EXIT["error"])
+            return
+        show(r, res)
+        ledger_update(r, base.get(r["id"]))
+        worst = max(worst, EXIT[res["state"]])
+        asked = asked or res["state"] == "blocked"
+
+    while runs and (first or time.time() - t0 < timeout):  # always look once, even with --timeout 0
+        first = False
+        before = pressed
+        for r in list(runs):
+            one(r)
+        if asked:
+            # Someone waits for the orchestrator and nobody presses routine keys for the others meanwhile. So serve them
+            # a few more passes (at most ~12 s) while they still need keys, then hand the question back.
+            for _ in range(3):
+                if not runs or pressed == before:
+                    break
+                before = pressed
+                time.sleep(4)
+                for r in list(runs):
+                    one(r)
             break
         if runs:
             time.sleep(4)
     for r in runs:
-        ledger_update(r)
+        ledger_update(r, base.get(r["id"]))
     if runs:
         print("still working: " + ", ".join(r["name"] for r in runs))
-        worst = worst or 3  # a question (2) outranks "others still working" (3)
-    return worst
+        worst = worst or 3
+    return 2 if asked else worst  # a question for you outranks every other code
 
 
 # ---- commands ----------------------------------------------------------------------------------------
