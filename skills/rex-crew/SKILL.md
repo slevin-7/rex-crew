@@ -27,7 +27,7 @@ tab with the task as its first prompt, and waits. Its output is all you need to 
 ```text
 == fix-retry   state: done   184s
 auto-approved (3): Bash: git status | Bash: npm test | Bash: git commit -m ...
-git: 4be2c1a retry: back off on 429 · dirty 0
+git: 4be2c1a retry: back off on 429 · branch main · dirty 0
 verify: exit 0
 report:
 STATUS: done
@@ -41,12 +41,14 @@ NEXT: surface the retry count in the logs
 | Exit | State | What to do |
 |---|---|---|
 | 0 | `done` | Clean: report written, verify passed, tree committed. Still read `verify` and `git` before the report. |
-| 1 | `unclean` | The turn ended, but an `ATTENTION:` line says what is wrong. |
+| 1 | `unclean` | The turn ended, but an `ATTENTION:` line says what is wrong (the header still says `state: done`). The pane stays open with its block shown: `screen BLOCK`, `send BLOCK "..."`, `collect` again; `close BLOCK` when done. |
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
-| 3 | `timeout` | Still working. `collect` waits again. |
+| 3 | `timeout` | Still working after `--timeout` seconds (default 900). `collect` waits again. |
 | 4 | `error` | The worker reported an error; `screen BLOCK` shows it. It may recover: `collect` again picks it up. |
 | 5 | `gone` | The pane is closed (two failed status calls in a row). |
 | 6 | (no state) | `collect NAME` for a name that was never started: check `runs`. |
+
+A `--policy` file that is missing or malformed (not JSON, `approve`/`never` not lists of non-empty regexes, any other key) exits 2 before anything starts. Other commands: `send`, `answer`, `deny` and `approve` exit 6 when there is nothing to act on, `approve --match` exits 7 when the open prompt differs, `sh` exits with the command's own status.
 
 ## Several workers at once
 
@@ -87,7 +89,7 @@ directory: ask the user first. `kind` tells you what is open: `permission`, `que
 A JSON file with two lists of regular expressions, matched against the prompt text such as `Bash: git status`:
 
 ```json
-{ "approve": ["^Bash: (git (status|log|diff)|npm test)\\b"],
+{ "approve": ["^Bash: (git (status|log|diff)|npm test)(\\s|$)"],
   "never":   ["\\b(rm|sudo|curl)\\b", "git push", "`|\\$\\("] }
 ```
 
@@ -148,4 +150,4 @@ exit 1, so never read a worker's summary without the lines above it.
   `-- --settings '{"enabledPlugins":{"NAME@MARKET":false}}'`.
 - A worker started in a folder for the first time asks whether to trust it. `--trust` confirms that dialog only
   if it names `DIR`.
-- `state: done` with `(the worker wrote no report file)`: it ended its turn early. `screen`, then `send`.
+- `state: done` with `ATTENTION: the worker wrote no report file`: it ended its turn early. `screen BLOCK`, then `send BLOCK "write the report"`, then `collect` (an unclean worker's pane is kept open for this).
