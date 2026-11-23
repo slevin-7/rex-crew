@@ -64,6 +64,8 @@ def main():
     if argv[:1] == ["-S"]:
         argv = argv[2:]
     st, cmd = load(), argv[0] if argv else ""
+    if sum(len(a.encode()) for a in argv) > 65536:  # observed on a real host: one control request is limited to 64 KiB
+        fail("request too large: one Rex control request is limited to 65536 bytes")
     if os.environ.get("FAKE_REX_WARN") and cmd != "capture":  # a flaky host: noise on stdout before the JSON
         print(os.environ["FAKE_REX_WARN"])
     if cmd == "run":

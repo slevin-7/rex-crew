@@ -95,7 +95,7 @@ A JSON file with two lists of regular expressions, matched against the prompt te
   "never":   ["\\b(rm|sudo|curl)\\b", "git push", "`|\\$\\("] }
 ```
 
-A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. A chained command
+A prompt that comes without its command (a very long command is reported as just `permission prompt`) is never answered for you, whatever the policy says; `needs you` then includes the tail of the worker's screen so you can decide at once. A prompt that carries a hook failure (`PreToolUse hook failed: ... · approve Bash: rtk git status`) is read by its `· approve` part. Commands rewritten by a host hook (`rtk git status`, `rtk proxy grep ...`) are matched as written: `policy.example.json` allows both forms. A text longer than one Rex request (64 KiB) is sent in pieces; an over-long `sh` command is refused with a message. A prompt is answered for you only if an `approve` pattern matches and no `never` pattern does. A chained command
 (`a; b | c`) is split outside quotes, and every part must match an `approve` pattern on its own. A newline also separates commands. Command substitution (`$(…)`, backticks) is never answered for you. `never` also sees the command with quotes removed (`~/.s''sh` = `~/.ssh`). A command that redirects output into a file (including `&>` and `>&`) is never
 answered for you (`2>&1` and `>/dev/null` do not count). It is re-read
 immediately before the key is pressed, and the answer is always the one-time Yes, never "always".
