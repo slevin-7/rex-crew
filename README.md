@@ -47,6 +47,14 @@ into dialogs, and guessing whether "done" is true. `rex-crew` folds that into on
 Tested with Rex 0.1.0-preview.21 and Claude Code 2.1.330 on macOS, orchestrating from one Mac to another. Codex workers: codex-cli 0.166.0 (see "Codex workers").
 Rex is in beta: commands may change.
 
+- **Guards on every key.** `send` types only into a worker pane it started itself (`--force` for one the user names), only while
+  the agent is still the program in front (not a shell left behind with a stale `idle`), never a message the agent would
+  take as something else (`!…`, a leading digit, `/permissions`), never into a dialog, and presses Return only once the
+  input box shows the text. A file `stop` next to the ledger stops all typing, approving and starting.
+- **Told, not polled.** `rex-crew watch`, started in the background from the orchestrator's Claude Code shell, writes one
+  message into that conversation through its messaging socket whenever a worker finishes, waits or fails. The socket's
+  line format is not documented by Claude Code (taken from 2.1.331): check it after an update.
+
 ## Install
 
 ```sh
@@ -86,6 +94,7 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 # runs.json.corrupt-<time>, never overwritten (the newest 5 are kept, older ones are removed); a rex call that gets no answer
 # within REX_CREW_TIMEOUT seconds (default 120) stops with an error naming the host, and a `start` that failed half way closes its pane; a state path that cannot be written stops `start` before any pane opens.
 rex-crew status [BLOCK] [--full]    # every reporting pane: state and open question; BLOCK or --full print the whole prompt; blocked: how long it waits
+rex-crew watch                      # in the background from Claude Code: a message into its conversation whenever a worker finishes or waits
 rex-crew collect --waiting-after 120 --stalled-after 600   # LONG WAIT line for a prompt open that long; names a worker whose screen did not change (also on run)
 rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start killed half way): list; adopt or close those a recent start claimed
 ```

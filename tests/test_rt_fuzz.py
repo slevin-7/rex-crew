@@ -127,7 +127,8 @@ class Fuzz(Base):
 
     def log_event(self, argv, rc, out):
         c = argv[:1]
-        if argv[:2] == ["block", "call"] and rc == 0:
+        # only a program_status read is a status read: `block call process` (is the agent still in front?) says nothing about prompts
+        if argv[:2] == ["block", "call"] and rc == 0 and argv[-1] == "program_status":
             blk = argv[argv.index("-b") + 1]
             try:
                 r = json.loads(out)["records"]

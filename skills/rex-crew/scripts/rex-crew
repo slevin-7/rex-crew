@@ -6,7 +6,7 @@ status, answers routine permission prompts from a policy file, hands every other
 you, and returns each worker's written report plus what is actually on disk (git, a verify command).
 `run` is both for a single task. Standard library only. See README.md.
 """
-import argparse, base64, calendar, contextlib, hashlib, json, os, posixpath, re, shlex, subprocess, sys, tempfile, time
+import argparse, base64, calendar, contextlib, hashlib, json, os, posixpath, re, shlex, socket, stat, subprocess, sys, tempfile, time
 try:
     import fcntl
 except ImportError:  # no flock on this platform: updates are still atomic, just not serialized
@@ -63,6 +63,7 @@ def oneline(text, n):
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
+STOP = os.path.join(os.path.dirname(LEDGER), "stop")  # the emergency stop: while it exists nothing is typed, approved or started
 REPORT_MAX = 100000  # bytes of the worker's report that are read back
 WAIT_AFTER = 120  # seconds a prompt may be open before collect says LONG WAIT (--waiting-after)
 STALL_AFTER = 600  # seconds a working worker's screen may stay the same before collect names it (--stalled-after)
@@ -387,6 +388,97 @@ def guard(block):
         die("refusing to act on the orchestrator's own pane", USAGE)
 
 
+def stopped():
+    """The emergency stop: a file `stop` next to the ledger. Only a person removes it."""
+    return os.path.lexists(STOP)
+
+
+def refuse_if_stopped(verb):
+    if stopped():
+        die(f"{verb}: refused, rex-crew is stopped ({STOP} exists). Report it; only a person removes that file", EXIT["blocked"])
+
+
+def owned(rex, block, force, verb):
+    """Keys go only into panes this tool started (an entry of this host and session); a pane the user names takes --force."""
+    if not force and not any(r["block"] == block for r in mine(rex, None)):
+        die(f"{verb}: {block} was not started by rex-crew in this session (see `rex-crew runs`); for a pane the user "
+            "names explicitly add --force", USAGE)
+
+
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "login", "nu", "xonsh"}
+
+
+def agent_in_front(rex, block, rec):
+    """Is the worker's agent still the program in front of its pane? (True | False | None, why). A status record
+    outlives its program: after the agent exits the pane can go on reporting idle while a shell sits at the prompt,
+    and text typed there runs as a command. None when the host would not say."""
+    p = rex.call("block", "call", "-s", rex.session, "-b", block, "process", check=False)
+    try:
+        proc = jload(p.stdout) if p.returncode == 0 else None
+    except ValueError:
+        proc = None
+    if not isinstance(proc, dict):
+        return None, "rex could not say which program runs in the pane"
+    fg = proc.get("foreground") if isinstance(proc.get("foreground"), dict) else {}
+    # seen on a real host (Rex preview.21, 24.11.2026): after the agent exits, a kept-open pane names no child and no foreground
+    if proc.get("last_exit") is not None or not proc.get("child") or not fg:
+        return False, "no program runs in the pane any more"
+    name = posixpath.basename(str(fg.get("name") or fg.get("path") or "")).lstrip("-").lower()
+    if name in SHELLS:
+        return False, f"a shell ({oneline(name, 20)}) is in front of the pane, not the agent"
+    owner = rec.get("owner") if isinstance(rec.get("owner"), dict) else {}
+    if isinstance(owner.get("pid"), int) and isinstance(fg.get("pid"), int) and owner["pid"] != fg["pid"]:
+        return False, "the program in front is not the one that reported the pane's status"
+    return True, ""
+
+
+WIDENING = ("/permissions", "/allowed-tools", "/config", "/settings", "/add-dir", "/hooks", "/plugin", "/mcp")
+
+
+def risky(text, claude=True):
+    """Why a message must not be typed into a worker's prompt, or None."""
+    t = text.lstrip()
+    if t.startswith("!"):
+        return "it starts with '!': the agent would run it as a shell command without asking"
+    if claude and re.match(r"[0-9]", t):
+        return "it starts with a digit: Claude Code's session survey would take it as a rating"
+    word = t.split(None, 1)[0].lower() if t else ""
+    if claude and word.startswith("/") and any(c.startswith(word) for c in WIDENING):
+        return f"{oneline(word, 30)} would change what the worker may do for the rest of its session"
+    return None
+
+
+def input_region(scr, below=False):
+    """The rows of a screen that belong to the agent's input, not its transcript. Claude Code draws its input box
+    between two horizontal rules and its dialogs under the last one; a screen without rules gives its last rows."""
+    lines = scr.splitlines()
+    rules = [i for i, l in enumerate(lines) if "──────────" in l]
+    if below:
+        return lines[rules[-1] + 1:] if rules else lines[-15:]
+    return lines[rules[-2] + 1:rules[-1]] if len(rules) >= 2 else lines[-15:]
+
+
+DIALOG_WORDS = re.compile(r"do you want to|would you like to|esc to cancel|enter to (select|confirm)|trust this folder|do you trust|hooks? needs? review", re.I)
+
+
+def dialog_open(scr):
+    """A dialog on screen although the status may say idle: a numbered list with a selected option, or a dialog's
+    own words, under the last rule (a transcript that quotes a dialog above the input box does not count)."""
+    region = input_region(scr, below=True)
+    picked = any(re.match(r"^\s*(❯|›|>)\s*[0-9]+\.\s", l) for l in region)
+    listed = sum(1 for l in region if re.match(r"^\s*(❯|›|>)?\s*[0-9]+\.\s", l)) >= 2
+    worded = "──────────" in scr and any(DIALOG_WORDS.search(l) for l in region)
+    return (picked and listed) or worded
+
+
+def shown(scr, text):
+    """Does the agent's input box show TEXT (its start or its end, spaces and non-ASCII ignored: the box wraps
+    lines)? A long paste shows as a placeholder. A text with nothing comparable counts as shown."""
+    keep = lambda x: re.sub(r"[^!-~]", "", x)
+    box, t = keep("\n".join(input_region(scr))), keep(text)
+    return not t or t[:20] in box or t[-20:] in box or "[Pastedtext" in box or "[PastedContent" in box
+
+
 def question(rec):
     """`permission approve Bash: git status` -> ('permission', 'Bash: git status')."""
     msg, kind = str(rec.get("msg") or ""), str(rec.get("kind") or "")  # the record comes from the worker's terminal
@@ -662,6 +754,8 @@ def approve_once(rex, block, expect):
         return False
     if rec.get("app", "claude-code") != "claude-code":
         return False  # other agents' dialogs are not known well enough to press keys in
+    if stopped() or agent_in_front(rex, block, rec)[0] is False:
+        return False  # stopped, or the record outlived its agent: the 1 would land in a shell
     rex.type(block, "1")
     return True
 
@@ -851,6 +945,7 @@ def tick(rex, run, policy):
 
 
 def start(rex, a, agent_args):
+    refuse_if_stopped("start")
     check_name(a.name)
     agent, hooks = getattr(a, "agent", None) or "claude", getattr(a, "codex_hooks", None)
     check_agent(agent, hooks)
@@ -1354,13 +1449,35 @@ def cmd_sh(rex, a):
 
 def cmd_send(rex, a):
     guard(a.block)
-    state = rex.status(a.block).get("state")
+    owned(rex, a.block, a.force, "send")
+    refuse_if_stopped("send")
+    text = " ".join(a.text)
+    rec = rex.status(a.block)
+    state = rec.get("state")
     if state not in ("done", "idle"):
         die(f"not sent: the worker is {state or 'not reporting'}, not at its prompt (a stray Return would answer its dialog). "
             f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`. "
             f"Quiet for minutes? Read `rex-crew screen BLOCK`: a worker waiting on a person is `close`d and started again with a narrower task", USAGE)
-    rex.type(a.block, " ".join(a.text))
-    time.sleep(1)  # let the TUI draw the text before Return
+    run = next((r for r in mine(rex, None) if r["block"] == a.block), None)
+    why = risky(text, claude=rec.get("app", "claude-code") == "claude-code" and (run is None or agent_of(run) == "claude"))
+    if why:
+        die(f"not sent: {why}; reword it", USAGE)
+    ok, why = agent_in_front(rex, a.block, rec)
+    if ok is None:
+        die(f"not sent: {why}; nothing was typed", EXIT["error"])
+    if not ok:
+        die(f"not sent: {why}, although it still reports {state}. The worker has exited: look with `rex-crew screen {a.block}`, "
+            "then close it or start a new one", EXIT["gone"])
+    if dialog_open(rex.screen(a.block, 40)):
+        die(f"not sent: a dialog is open on the worker's screen although it reports {state}; look with `rex-crew screen {a.block}`", EXIT["blocked"])
+    rex.type(a.block, text)
+    for _ in range(6):  # Return only once the input box shows the text: typed elsewhere it would answer something else
+        time.sleep(0.5)
+        scr = rex.screen(a.block, 40)
+        if shown(scr, text) and not dialog_open(scr):
+            break
+    else:
+        die(f"typed but not submitted: the worker's input box does not show the text. Look with `rex-crew screen {a.block}`", EXIT["blocked"])
     rex.key(a.block, "enter")
     # a new turn: collect should wait for it again
     update_runs(rex, a.block, ("open", "blocked", "timeout", "done", "unclean"), state="open", t0=time.time(), seen=False, wait_since=None, wait=None)
@@ -1368,6 +1485,8 @@ def cmd_send(rex, a):
 
 def cmd_approve(rex, a):
     guard(a.block)
+    owned(rex, a.block, a.force, "approve")
+    refuse_if_stopped("approve")
     try:
         wanted = re.compile(a.match or "")
     except re.error as e:
@@ -1376,6 +1495,8 @@ def cmd_approve(rex, a):
     kind, text = question(rec)
     if a.match and not wanted.search(text):
         die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", EXIT["blocked"])
+    if rec.get("state") == "blocked" and agent_in_front(rex, a.block, rec)[0] is False:
+        die(f"not approved: the agent in {a.block} has exited; its prompt is a leftover record. See `rex-crew screen {a.block}`", EXIT["gone"])
     if not approve_once(rex, a.block, text):
         die("no permission prompt open, or the worker is not Claude Code (this tool never presses keys in another agent's dialog). See `rex-crew status` for what the pane is doing", USAGE)
     for r in mine(rex, KEEPS_PANE):
@@ -1404,7 +1525,11 @@ def answer_startup(rex, a):
 def cmd_answer(rex, a):
     """Answer a worker's question: pick a numbered option, or type free text into its last option."""
     guard(a.block)
+    owned(rex, a.block, a.force, "answer")
+    refuse_if_stopped("answer")
     rec = rex.status(a.block)
+    if rec and agent_in_front(rex, a.block, rec)[0] is False:
+        die(f"not answered: the agent in {a.block} has exited; see `rex-crew screen {a.block}`", EXIT["gone"])
     if not rec and answer_startup(rex, a):
         return
     if rec.get("state") == "blocked" and rec.get("kind") != "question" and rec.get("app", "claude-code") != "claude-code":
@@ -1433,10 +1558,120 @@ def cmd_answer(rex, a):
 
 def cmd_deny(rex, a):
     guard(a.block)
+    owned(rex, a.block, a.force, "deny")
     if rex.status(a.block).get("state") != "blocked":
         die("nothing to deny: the worker is not blocked. See `rex-crew status`", USAGE)
     rex.key(a.block, "escape")
     update_runs(rex, a.block, LIVE, wait_since=None, wait=None)
+
+
+def notify(sock, text):
+    """One message into the orchestrator's Claude Code session through its messaging socket. Claude Code delivers a
+    message from the session's own child processes without asking; it tells the model the message came from elsewhere.
+    The line format is not documented (taken from Claude Code 2.1.331, 24.11.2026): check it after a Claude Code update."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    try:
+        s.connect(sock)
+        s.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": text}}) + "\n").encode())
+    finally:
+        s.close()
+
+
+def watch_events(rex, runs, memo, now):
+    """What is new about the open workers since the last look, as (key, line). Read only: nothing is pressed, nothing
+    in the ledger changes. A line names the worker and the command that shows more; never the worker's own text."""
+    out = []
+    for r in runs:
+        b, name = r.get("block"), r["name"]
+        if not b:
+            continue
+        m = memo.get(b)
+        if not m or m["t0"] != r.get("t0"):  # a new turn (send, answer): look at it afresh
+            m = memo[b] = {"t0": r.get("t0"), "seen": bool(r.get("seen")), "idle": 0, "gone": 0}
+        rec = rex.status(b)
+        state, age = rec.get("state", "none"), now - (r.get("t0") if isinstance(r.get("t0"), (int, float)) else now)
+        if state == "working":
+            m.update(seen=True, idle=0, gone=0)
+        elif state == "gone":
+            m["gone"] += 1
+            if m["gone"] >= 2 and rex.alive(b) is False:
+                out.append((f"gone:{b}", f"worker {name}: its pane is gone; `rex-crew collect {name}` shows what it left on disk"))
+        elif state in ("idle", "done") and (m["seen"] or age > 30 or state == "done"):
+            m["gone"], m["idle"] = 0, m["idle"] + 1
+            if (state == "done" and (m["seen"] or age > 30)) or m["idle"] >= 2:
+                out.append((f"done:{b}:{m['t0']}", f"worker {name} finished its turn: `rex-crew collect {name}`"))
+        elif state == "blocked":
+            what = {"permission": "a permission prompt", "question": "a question", "auth": "a sign-in"}.get(str(rec.get("kind") or ""), "a person")
+            out.append((f"blocked:{b}:{oneline(rec.get('updated_at', ''), 40)}:{m['t0']}",
+                        f"worker {name} waits for {what}: `rex-crew status {b}`"))
+        elif state == "error":
+            out.append((f"error:{b}:{m['t0']}", f"worker {name} reports an error: `rex-crew collect {name}`"))
+        elif state == "none" and age > 60 and not m["seen"]:
+            out.append((f"silent:{b}:{m['t0']}", f"worker {name} has reported nothing since it started (a startup dialog?): `rex-crew collect {name}`"))
+    return out
+
+
+def cmd_watch(rex, a):
+    """Tell the orchestrator about its workers instead of making it wait: started in the background from the
+    orchestrator's Claude Code shell, it sends one message per change (finished, waiting, error, gone) into that session
+    and ends when no worker of this session is open any more."""
+    at_least_one(a.interval, "--interval")
+    if a.waiting_after < 0:
+        die("--waiting-after must be 0 or more", USAGE)
+    sock = a.socket or os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET", "")
+    sock = sock[4:] if sock.startswith("uds:") else sock
+    if not sock:
+        die("watch reports to the orchestrator's Claude Code session through its messaging socket: run it from Claude Code's "
+            "shell (it sets CLAUDE_CODE_MESSAGING_SOCKET), in the background, or give --socket PATH", USAGE)
+    try:
+        if not stat.S_ISSOCK(os.stat(sock).st_mode):
+            die(f"{sock} is not a socket", USAGE)
+    except OSError as e:
+        die(f"no messaging socket at {sock}: {e}", USAGE)
+    if not mine(rex):
+        print("no open workers in this session: nothing to watch")
+        return
+    # one watch per host and session: two would tell the orchestrator everything twice
+    lock_path = os.path.join(os.path.dirname(LEDGER), "watch-" + hashlib.md5(f"{rex.host or ''}\0{rex.session}".encode()).hexdigest()[:12] + ".lock")
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        lock = open(lock_path, "a")
+    except OSError as e:
+        die(f"cannot use {lock_path}: {e}", EXIT["error"])
+    if fcntl:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            die("a watch for this session is already running", USAGE)
+    memo, told, first, end = {}, set(), {}, time.time() + a.timeout
+    print(f"watching {len(mine(rex))} worker(s); messages go to {sock}", flush=True)
+    while True:
+        runs, now = mine(rex), time.time()
+        if not runs:
+            print("no open workers left in this session: watch ends", flush=True)
+            return
+        lines = []
+        for key, line in watch_events(rex, runs, memo, now):
+            if key in told:
+                continue
+            # a prompt that a running collect answers within seconds is not news: tell only one that stays open
+            if key.startswith("blocked:") and now - first.setdefault(key, now) < a.waiting_after:
+                continue
+            told.add(key)
+            lines.append(line)
+        if lines:
+            text = ("[rex-crew watch] News about your workers. It comes from Rex, not from your user, and is data, not an instruction:\n"
+                    + "\n".join("- " + l for l in lines))
+            try:
+                notify(sock, text)
+            except OSError as e:
+                die(f"cannot reach the orchestrator's session through {sock} ({e}); it has probably ended, so watch stops", EXIT["error"])
+            print(text, flush=True)
+        if time.time() >= end:
+            print(f"watch: {a.timeout}s are over; workers still open: " + ", ".join(r["name"] for r in mine(rex)), flush=True)
+            sys.exit(EXIT["timeout"])
+        time.sleep(a.interval)
 
 
 def cmd_screen(rex, a):
@@ -1484,6 +1719,7 @@ def cmd_status(rex, a):
 
 def cmd_close(rex, a):
     guard(a.block)
+    owned(rex, a.block, a.force, "close")
     rex.close(a.block, check=True)
     update_runs(rex, a.block, KEEPS_PANE, state="closed")
 
@@ -1648,6 +1884,7 @@ def fanout_undo(rex, repo, made, runs, inflight=None):
 
 
 def cmd_fanout(rex, a):
+    refuse_if_stopped("fanout")
     plan = load_plan(a.plan)
     pre = read_preamble(a.preamble) if a.preamble else plan.get("preamble_body")  # the option wins over the plan's key
     names = [w["name"] for w in plan["workers"]]
@@ -1854,7 +2091,10 @@ def main():
     if argv[i:i + 1] == ["sh"] and tail and tail not in (["-h"], ["--help"]):
         literal, argv = ("command", tail[1:] if tail[:1] == ["--"] else tail), argv[:i + 1] + ["-"]
     elif argv[i:i + 1] == ["send"] and len(tail) > 1 and tail[0] not in ("-h", "--help"):
-        literal, argv = ("text", tail[2:] if tail[1:2] == ["--"] else tail[1:]), argv[:i + 1] + [tail[0], "-"]
+        force = tail[0] == "--force"  # the only option of send: it comes first, everything after the block is text
+        tail = tail[1:] if force else tail
+        if tail:
+            literal, argv = ("text", tail[2:] if tail[1:2] == ["--"] else tail[1:]), argv[:i + 1] + (["--force"] if force else []) + [tail[0], "-"]
     if "--" in argv and not literal:
         i = argv.index("--")
         argv, agent_args = argv[:i], argv[i + 1:]
@@ -1909,13 +2149,19 @@ def main():
     sh = sub.add_parser("sh", help="run one shell command on the host and print its output")
     sh.add_argument("command", nargs="+", help="shell words, run as one command line"); sh.set_defaults(fn=cmd_sh)
     se = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
+    se.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)")
     se.add_argument("block", help="the worker's pane id"); se.add_argument("text", nargs="+", help="the message"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
-    ap.add_argument("block"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 2: it needs you)"); ap.set_defaults(fn=cmd_approve)
+    ap.add_argument("block"); ap.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 2: it needs you)"); ap.set_defaults(fn=cmd_approve)
     an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
-    an.add_argument("block"); an.add_argument("choice")
+    an.add_argument("block"); an.add_argument("choice"); an.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)")
     an.add_argument("--text", action="store_true", help="CHOICE is free text, even if it is only digits (e.g. a year)"); an.set_defaults(fn=cmd_answer)
-    dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
+    dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)"); dn.set_defaults(fn=cmd_deny)
+    wa = sub.add_parser("watch", help="tell the orchestrator's Claude Code session when a worker finishes or waits; run it in the background")
+    wa.add_argument("--socket", help="the session's messaging socket (default: CLAUDE_CODE_MESSAGING_SOCKET, which Claude Code sets for its shell)")
+    wa.add_argument("--interval", type=int, default=15, help="seconds between two looks (default 15)")
+    wa.add_argument("--waiting-after", type=int, default=20, metavar="SECS", help="tell about a waiting worker only once its prompt is open this long (default 20)")
+    wa.add_argument("--timeout", type=int, default=8 * 3600, help="stop after this many seconds (default 8 hours)"); wa.set_defaults(fn=cmd_watch)
     sc = sub.add_parser("screen", help="the last visible lines of a worker's pane")
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)
     sc.set_defaults(fn=cmd_screen)
@@ -1928,7 +2174,7 @@ def main():
     sg = sy.add_mutually_exclusive_group()
     sg.add_argument("--adopt", action="store_true", help="record panes that a recent start claimed as open workers"); sg.add_argument("--close", action="store_true", help="close panes that a recent start claimed")
     sy.set_defaults(fn=cmd_strays)
-    cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.set_defaults(fn=cmd_close)
+    cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)"); cl.set_defaults(fn=cmd_close)
     ss = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)
 

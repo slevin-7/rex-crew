@@ -88,6 +88,22 @@ before the report protocol; a missing or empty file exits 6 before anything star
 `grep -n`, `sed -n`) pass and `sh -c`, `<( )`, `$( )`, env prefixes and other redirects wait for a human: your policy still decides what passes.
 `checkout` accepts a relative repo path (resolved on the host); `--copy` brings untracked files a fresh worktree lacks. Parallel workers do not know about each other's changes: merge them with `integrate` (below) and verify the merged result.
 
+### Let watch tell you instead of waiting
+
+`collect` blocks you until a worker ends. When you are inside Claude Code, start `watch` once, **in the background**, right
+after the workers, and go on with the user:
+
+```sh
+"$here/rex-crew" watch          # background job; ends by itself when no worker of this session is open any more
+```
+
+It sends one message into your own conversation per change: a worker finished its turn, waits for a permission prompt or a
+question (only once it has been open for `--waiting-after SECS`, default 20), reports an error, or its pane is gone. Each
+message names the worker and the command to run next (`rex-crew collect NAME`, `rex-crew status BLOCK`), never the worker's
+own text. It reads only: it presses nothing and answers nothing, so a routine prompt still needs `collect --policy` or you.
+It finds your session through `CLAUDE_CODE_MESSAGING_SOCKET`, which Claude Code sets for its shell (`--socket PATH`
+otherwise); one watch per session at a time. When a message arrives, run the command it names.
+
 ### Fan out from one plan, integrate afterwards
 
 `fanout PLAN.json` does the `checkout` and `start` of every worker in one call, all or nothing. `integrate REPO NAME...` merges the
@@ -159,6 +175,17 @@ commands (`filter.lfs.*` is not reported): look at `git config --local --list`. 
 "$here/rex-crew" collect --policy policy.json               # then wait again: verify and report as before
 ```
 
+`send`, `approve`, `answer`, `deny` and `close` act only on panes rex-crew started in this session (a pane the user names
+explicitly takes `--force`). `send` also refuses, and says why:
+- a worker whose agent has exited although its pane still reports `idle` (a shell would get the text): exit 5;
+- a message that starts with `!` (a shell command), a digit (Claude Code's survey takes it as a rating) or a slash command that
+  widens permissions (`/permissions`, `/add-dir`, ...): exit 6, reword it;
+- a pane with a dialog on screen although it reports `idle`: exit 2, look with `screen`;
+- and it presses Return only once the input box shows the text (otherwise exit 2: the text is typed, not submitted).
+
+**Emergency stop:** while a file `stop` lies next to the ledger (`~/.local/state/rex-crew/stop` by default), nothing is
+typed, approved or started (exit 2); `deny`, `close`, `collect` without keys and `watch` still work. Only a person removes it.
+
 Approve only what the user's request covers; deleting, pushing, credentials, anything outside the task directory: ask the user first. `kind` is `permission`, `question`, `auth`, or `startup` (a dialog before the agent runs).
 
 ## Policy
@@ -206,6 +233,7 @@ exit 1, so read the lines above a worker's summary first.
 | `runs [--all]` | The ledger: workers started in this session (all sessions when none is set), with state, block, session and age. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>`. |
 | `screen BLOCK [LINES]` | The visible end of a pane (no scrollback: long answers belong in the report file). |
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
+| `watch [--interval SECS]` | In the background: a message into your Claude Code conversation whenever a worker finishes or waits (see above). |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
 
 ## Method: what real runs taught

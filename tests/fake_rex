@@ -6,7 +6,10 @@ State layout:
    "scripts": {LABEL: [record, ...]},   # what a block started with --label LABEL reports, one record per
                                         # program_status call; the last record repeats. The string "GONE"
                                         # as a record makes the pane disappear at that call.
-   "blocks": {ID: {"label", "output", "script", "closed", "session"}},
+   "blocks": {ID: {"label", "output", "script", "closed", "session", "typed"}},
+   "screens": {LABEL: text},            # what capture shows for a block started with --label LABEL
+   "procs": {LABEL: process},           # what `block call process` returns for it (default: claude in front)
+Text sent to a block shows under "❯ " in its capture until Enter, like an agent's input box (FAKE_REX_NO_ECHO=1: never).
    "sent": [{"block", "kind": "text"|"key", "value"}]}
 `run --wait -- sh -c CMD` really runs CMD locally; its output is what `capture` returns for that block.
 """
@@ -92,7 +95,7 @@ def dispatch(argv):
         o, _ = opts(rest[:i], {"-s", "--label"})
         prog = rest[i + 1:]
         bid = f"b{st['next']}"; st["next"] += 1
-        blk = {"label": o.get("--label", ""), "output": "", "closed": False, "session": o.get("-s", ""),
+        blk = {"label": o.get("--label", ""), "output": st.get("screens", {}).get(o.get("--label", ""), ""), "closed": False, "session": o.get("-s", ""),
                "script": list(st["scripts"].get(o.get("--label", ""), [])), "prog": prog}
         st["blocks"][bid] = blk
         rc = 0
@@ -107,6 +110,10 @@ def dispatch(argv):
         if sub == "call":
             o, pos = opts(argv[2:], {"-s", "-b"})
             blk = live(st, o["-b"])
+            if pos == ["process"]:
+                print(json.dumps(st.get("procs", {}).get(blk["label"]) or
+                                 {"child": {"pid": 1, "name": "login"}, "foreground": {"pid": 4242, "name": "claude"}, "last_exit": None}))
+                return
             if pos != ["program_status"]:
                 fail("unsupported block call")
             if blk["script"] and blk["script"][0] == "GONE":
@@ -127,15 +134,24 @@ def dispatch(argv):
             fail("unsupported block command")
     elif cmd == "capture":
         o, _ = opts(argv[1:], {"-s", "-b"})
-        out = live(st, o["-b"])["output"]
+        blk = live(st, o["-b"])
+        out = blk["output"]
+        if blk.get("typed") and not os.environ.get("FAKE_REX_NO_ECHO"):
+            box = out.rfind("\n❯ \n")  # a drawn input box (between two rules) takes the text, as a real agent's does
+            out = (out[:box] + "\n❯ " + blk["typed"] + out[box + 2:] if box >= 0 else
+                   out + ("" if not out or out.endswith("\n") else "\n") + "❯ " + blk["typed"] + "\n")
         keep = int(os.environ.get("FAKE_REX_KEEP_LINES") or 0)  # a terminal that keeps only its last N lines
         if keep:
             out = "\n".join(out.splitlines()[-keep:]) + "\n"
         print(out, end="")
     elif cmd in ("send", "send-key"):
         o, pos = opts(argv[1:], {"-s", "-b"})
-        live(st, o["-b"])
+        blk = live(st, o["-b"])
         st["sent"].append({"block": o["-b"], "kind": "text" if cmd == "send" else "key", "value": pos[0]})
+        if cmd == "send":
+            blk["typed"] = blk.get("typed", "") + pos[0]
+        elif pos[0] in ("enter", "escape"):
+            blk["typed"] = ""
         save(st)
     elif cmd == "ls":
         print(json.dumps({"sessions": st["sessions"]}))

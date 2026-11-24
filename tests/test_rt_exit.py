@@ -23,7 +23,7 @@ class Table(Base):
         self.assertNotIn(self.mod.USAGE, self.mod.EXIT.values())
 
     def test_failed_host_call_is_an_error_not_unclean(self):
-        code, out, err = self.cli("close", "b99")  # the fake host: no such block
+        code, out, err = self.cli("close", "--force", "b99")  # the fake host: no such block (--force: the point is the host call, not ownership)
         self.assertEqual(code, 4, out + err)
 
     def test_missing_rex_binary_is_an_error_without_traceback(self):
