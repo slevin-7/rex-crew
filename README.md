@@ -142,6 +142,10 @@ anyway). A policy file that is missing, not JSON, of the wrong shape or has an i
 (exit 2) naming the file and the pattern; `run` checks it before it starts the worker. Never answered for you: `Write:`/`Edit:` paths with
 `..` or a line break, and Bash text that uses `$VAR`, brace lists, or a glob in a hidden or directory segment (`~/.s?h/`, `/e?c/`).
 
+A `$` is a real expansion (and the prompt is never answered for you) when sh would expand it: unquoted or in double quotes before a letter, digit, `_`, `{`, `[`, `@`, `*`, `#`, `?`, `!`, `$` or `-`. It is plain text, and the prompt stays routine, in single quotes, after a backslash (`"wait \$wp"`), before anything else (a space, a quote, `|`, `.`, `/`, the end: `grep 'foo$' f`) and inside a `#` comment.
+A command may be wrapped in `time`, `time -p` or `timeout [-k D] [-s SIG] DURATION`: the wrapped command is the one matched against `approve` and `never` (`never` also sees the wrapper). Other options of these wrappers (`time -o FILE`) are not recognised, so the prompt is not answered for you.
+An env prefix (`FOO=1 python3 -m unittest`) is never answered for you unless the policy lists the variable's NAME in an optional third key, `"env": ["CI", "FOO"]`; the value must be plain (letters, digits and `_.,:/+@%-`). Names that change what a command loads or runs (`LD_*`, `DYLD_*`, `GIT_*`, `PATH`, `PYTHON*`, `HOME`, `NODE_*`, `BASH*`, …) make the policy file invalid (exit 2).
+
 ## Limits
 
 - Claude Code only. Other agents' dialogs are not answered; their questions still come back to you.
