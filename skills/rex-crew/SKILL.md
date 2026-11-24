@@ -8,7 +8,7 @@ description: "Run Claude Code workers in Rex panes on this machine or another Re
 You plan. Workers build, in Rex panes, on this machine or on another Rex host. Workers never run with
 permissions bypassed: every prompt is either covered by a policy you wrote down, or it comes to you as text.
 
-`here` is the `scripts/` directory beside this file. Everything is `"$here/rex-crew" ...`.
+`here` is the `scripts/` directory beside this file. Everything is `"$here/rex-crew" ...`. It needs the `rex` CLI on PATH and talks to the session in `REX_CREW_SESSION` (or `-s ID`); without one every command exits 2.
 
 ## The one call
 
@@ -62,7 +62,14 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 "$here/rex-crew" collect --policy policy.json      # prints each report as its worker ends
 ```
 
-`collect` exits 0 when every worker is done, and 2 as soon as one needs you (2 wins over every other code, also over an error); it names the workers still running.
+A worker that needs you is printed with its block id in the header, for every such worker at once; use that id for the commands below:
+
+```text
+== docs   state: blocked   12s   block: b7
+needs you (permission): Bash: make deploy
+```
+
+`collect` exits 0 when every worker is done, and 2 when any needs you (2 wins over every other code, also over an error); it names the workers still running. A report is printed once: a later `collect` says `no open workers`, and `runs` shows what finished.
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
 answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again. A Rex host that does not answer one call within `REX_CREW_TIMEOUT` seconds (default 120) is an error that names the host, not a hang. Text for `send` and `sh` may start with a dash (`send BLOCK -1`). A worker whose first status is `done` is collected after two looks, and two `collect` processes report a worker only once.
 An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
@@ -82,9 +89,9 @@ workers' branches `crew/NAME` into the branch that REPO has checked out.
 ```
 
 ```sh
-"$here/rex-crew" fanout plan.json                  # prints one "started" line per worker; exit 2 = plan refused, nothing created
+"$here/rex-crew" fanout plan.json                  # one "started NAME block: b5 dir: ... branch: crew/NAME" line per worker, then a "next:" hint; exit 2 = plan refused, nothing created
 "$here/rex-crew" collect --policy policy.json      # as above; every worker must have COMMITTED its work
-"$here/rex-crew" integrate /abs/repo api docs --verify 'npm test'
+"$here/rex-crew" integrate /abs/repo api docs --verify 'npm test'   # NAMEs, not crew/NAME; the plan's verify is only for collect
 ```
 
 ```text
@@ -99,12 +106,12 @@ a `copy` path that is absolute, uses `..` or does not exist, an empty `verify`, 
 or a live worker of the same name refuses the whole plan (exit 2) before anything is created. If a later step fails (or you press Ctrl-C), the panes are
 closed and the worktrees and branches that this call made are removed again; ones it did not make are never touched.
 
-`integrate` first refuses (exit 2, nothing merged) if the tree of REPO has any change or untracked file, HEAD is detached, a merge or rebase is
+`integrate` runs `--verify` after each merge, on the tree merged so far, not once at the end. It first refuses (exit 2, nothing merged) if the tree of REPO has any change or untracked file, HEAD is detached, a merge or rebase is
 under way, a branch is missing, listed twice or is the current branch. Then, per branch, in the order given: `merged`; `conflict: FILES` (the merge is
 aborted); `merge failed: MESSAGE` (for example unrelated histories); `verify failed (exit N)` or `verify did not finish within Ns` (`--verify-timeout`, default 600;
-that merge is undone and files the verify left behind are removed); `nothing to merge` (the branch has no commit the current one lacks: the worker did not commit;
+that merge is undone and files the verify left behind are removed); `nothing to merge` (the branch has no commit the current one lacks: it is already merged, or the worker did not commit;
 the run goes on but exits 1). At the first conflict or failed verify it stops, prints the rest as `not attempted`, leaves the tree clean and exits 1.
-A worker's uncommitted changes are not in its branch: `integrate` warns when a branch's checkout has some. Run `integrate` on the host's REPO only when nobody else is using its working tree.
+A worker's uncommitted changes are not in its branch: `integrate` warns when a branch's checkout has some. Run `integrate` on the host's REPO only when nobody else is using its working tree. Checkouts and `crew/NAME` branches stay afterwards: `close BLOCK` the panes and remove them with `git worktree remove` / `git branch -d` via `sh`.
 
 `"$here/rex-crew" runs` lists what was started in this session, with state and block. It is kept on disk, so a new
 conversation can pick up open workers: read it first when you resume orchestration.
@@ -112,7 +119,7 @@ conversation can pick up open workers: read it first when you resume orchestrati
 ## When a worker needs you
 
 ```sh
-"$here/rex-crew" approve BLOCK --match 'docker compose up'   # one-time Yes, only if the prompt still matches
+"$here/rex-crew" approve BLOCK --match 'make deploy'   # one-time Yes, only if the prompt still matches; always give --match, the worker may have moved on
 "$here/rex-crew" deny BLOCK                                  # Escape; then `send` what to do instead
 "$here/rex-crew" send BLOCK "Use the staging database."      # only when the worker is at its prompt
 "$here/rex-crew" collect --policy policy.json               # then wait again: verify and report as before
