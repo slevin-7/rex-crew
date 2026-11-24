@@ -32,6 +32,41 @@ class TestVerifyHang(HostBase):
             os.kill(pid, 9)
             self.fail("the hung verify command is still running")
 
+    def hung_case(self, verify_body):
+        d = self.workdir()
+        pidfile = f"{self.tmp.name}/verify.pids"
+        self.script("w1", rec("working"), rec("done"))
+        verify = verify_body.replace("PIDS", pidfile)
+        self.cli("start", "w1", d, self.task, "--verify", verify, "--verify-timeout", "1")
+        self.report(d, "w1")
+        t0 = time.time()
+        code, out, err = self.cli("collect")
+        self.assertLess(time.time() - t0, 20)
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("ATTENTION: verify did not finish within 1s and was killed", out)
+        self.assertNotIn("Terminated", out + err)
+        with open(pidfile) as fh:
+            pids = [int(x) for x in fh.read().split()]
+        self.assertGreaterEqual(len(pids), 2)
+        alive = []
+        for pid in pids:
+            for _ in range(30):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.2)
+            else:
+                alive.append(pid)
+                os.kill(pid, 9)
+        self.assertEqual(alive, [], "processes survived the watchdog")
+
+    def test_multi_command_verify_with_hung_last_command_dies_completely(self):
+        self.hung_case("echo start; sh -c 'sleep 37 & echo $! >> PIDS; echo $$ >> PIDS; wait'")
+
+    def test_hang_in_grandchild_of_multi_command_verify_dies_completely(self):
+        self.hung_case("echo start; sh -c 'echo $$ >> PIDS; sh -c \"echo \\$\\$ >> PIDS; sleep 37\"; sleep 38'; true")
+
     def test_fast_verify_is_unaffected_by_the_watchdog(self):
         t0 = time.time()
         code, out, _ = self.finished(self.workdir(), "w1", "--verify", "echo fine; exit 3")

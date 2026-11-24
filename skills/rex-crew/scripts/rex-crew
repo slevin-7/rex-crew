@@ -1266,10 +1266,14 @@ def preflight(rex, script, repo, m):
 
 def watched(cmd, vt, m):
     """Shell text: run CMD with a watchdog; prints its last lines, then VRC with the exit status (or timeout)."""
-    return ("kt() { set -- \"$1\" \"$2\" $(ps -A -o pid= -o ppid= | awk -v p=\"$1\" '$2==p{print $1}'); kill -s \"$2\" \"$1\" 2>/dev/null; s=$2; shift 2; for c; do kt \"$c\" \"$s\"; done; }; "
+    # tree PID prints PID first, then all its descendants, from one process-table snapshot; kt signals that whole list at once,
+    # so it does not matter in which order the processes die. The watchdog takes the list once and reuses it for KILL,
+    # because after TERM the survivors are no longer children of PID.
+    return ("tree() { ps -A -o pid= -o ppid= | awk -v p=\"$1\" '{ q[NR]=$1; pp[$1]=$2 } END { a[p]=1; do { c=0; for (i=1;i<=NR;i++) if (!(q[i] in a) && (pp[q[i]] in a)) { a[q[i]]=1; c=1 } } while (c); print p; for (x in a) if (x != p) print x }'; }; "
+            "kt() { kill -s \"$2\" $(tree \"$1\") 2>/dev/null; }; "
             "vf=$(mktemp \"${TMPDIR:-/tmp}/rex-crew-verify.XXXXXX\") || exit 96; "
             f"( unset -f git; {cmd}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
-            f"( sleep {vt}; : > \"$vf.to\"; kt $vp TERM; sleep 3; kt $vp KILL ) </dev/null >/dev/null 2>&1 & wp=$!; "
+            f"( sleep {vt}; : > \"$vf.to\"; l=$(tree $vp); kill -s TERM $l 2>/dev/null; sleep 3; kill -s KILL $l 2>/dev/null ) </dev/null >/dev/null 2>&1 & wp=$!; "
             f"wait $vp 2>/dev/null; vrc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then vrc=timeout; fi; "
             f"echo {m}VOUT; tail -n 15 \"$vf\" | tail -c 4000 | awk '{{gsub(/@@/,\"@ @\"); print}}'; rm -f \"$vf\" \"$vf.to\"; echo {m}VRC $vrc; ")
 
