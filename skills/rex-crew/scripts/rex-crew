@@ -842,7 +842,9 @@ def show(run, res, brief=False):
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
         print("git: " + " · ".join(oneline(x, 300) for x in res["git"].splitlines()))
-        if res["verify_rc"] != "none":
+        if res["verify_rc"] == "none":
+            print("verify: not run (no --verify given): nothing here shows the work passes its checks")
+        else:
             tail = clean(res["verify_tail"])
             if brief:
                 tail = "\n".join(oneline(l, BRIEF_WIDTH) for l in tail.splitlines()[-6:])
@@ -1045,7 +1047,8 @@ def cmd_send(rex, a):
     state = rex.status(a.block).get("state")
     if state not in ("done", "idle"):
         die(f"not sent: the worker is {state or 'not reporting'}, not at its prompt (a stray Return would answer its dialog). "
-            f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`", 6)
+            f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`. "
+            f"Quiet for minutes? Read `rex-crew screen BLOCK`: a worker waiting on a person is `close`d and started again with a narrower task", 6)
     rex.type(a.block, " ".join(a.text))
     time.sleep(1)  # let the TUI draw the text before Return
     rex.key(a.block, "enter")

@@ -34,7 +34,7 @@ into dialogs, and guessing whether "done" is true. `rex-crew` folds that into on
 - **Reports, not screens.** Each task gets a report protocol appended. The worker writes `STATUS`, `CHANGED`,
   `VERIFIED`, `COMMIT`, `OPEN`, `NEXT` to a file, and `rex-crew` reads that file from the host.
 - **Facts beside the report.** After the turn, `rex-crew` runs your `--verify` command on the host and reads
-  the last commit and whether the tree is dirty.
+  the last commit and whether the tree is dirty. Without `--verify` it prints `verify: not run`: nothing checked the work.
 - **Other machines.** `-S HOST` is any label from `rex hosts`. Nothing is installed on the host: tasks, reports
   and checks travel through Rex.
 
