@@ -39,9 +39,9 @@ def read_preamble(path):
         with open(os.path.expanduser(path), "rb") as f:
             data = f.read()
     except OSError as e:
-        die(f"cannot read the preamble {path}: {e}", 2)
+        die(f"cannot read the preamble {path}: {e}", USAGE)
     if not data.strip():
-        die(f"the preamble {path} is empty: give a file with the standing instructions, or leave --preamble out", 2)
+        die(f"the preamble {path} is empty: give a file with the standing instructions, or leave --preamble out", USAGE)
     return data
 
 
@@ -65,8 +65,15 @@ SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
 REPORT_MAX = 100000  # bytes of the worker's report that are read back
 EXIT = {"done": 0, "unclean": 1, "blocked": 2, "timeout": 3, "error": 4, "gone": 5}
-# Not worker outcomes: die() exits 2 for input refused before anything started, 6 for an unknown NAME or nothing to
-# act on, 7 for an --match that differs, and 1 for a failed host call (the code shared with "unclean").
+# One table for every command: 0 clean, 1 unclean, 2 needs you, 3 timeout, 4 error (a failed or silent host call too),
+# 5 gone, USAGE for input refused or a command that cannot apply (bad option, unknown NAME, nothing to act on).
+# `approve --match` that differs and `integrate` finding REPO not ready are "needs you" (2): a person must look.
+USAGE = 6
+
+
+def exit_of(state):
+    """The code of a ledger or report state that is not a worker outcome itself: still working is a timeout, closed is gone."""
+    return EXIT.get(state, {"working": EXIT["timeout"], "closed": EXIT["gone"]}.get(state, EXIT["error"]))
 NAME_RE = r"[a-z][a-z0-9_-]{0,31}"
 
 
@@ -74,19 +81,19 @@ def warn(msg):
     print(f"rex-crew: {msg}", file=sys.stderr)
 
 
-def die(msg, code=1):
+def die(msg, code=EXIT["error"]):
     warn(msg)
     sys.exit(code)
 
 
 def check_name(name):
     if not re.fullmatch(NAME_RE, name):
-        die(f"NAME {name!r} must be lowercase a-z0-9_- and at most 32 characters", 2)
+        die(f"NAME {name!r} must be lowercase a-z0-9_- and at most 32 characters", USAGE)
 
 
 def at_least_one(value, option):
     if value < 1:
-        die(f"{option} must be at least 1", 2)
+        die(f"{option} must be at least 1", USAGE)
 
 
 def rpc_timeout():
@@ -118,9 +125,11 @@ class Rex:
         limit = wait or rpc_timeout()
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
+        except OSError as e:  # no rex on PATH, not executable: a host failure, not a traceback
+            die(f"cannot run {cmd[0]}: {e}. Is the Rex CLI installed and on PATH?")
         except subprocess.TimeoutExpired:
             die(f"rex {' '.join(args[:3])} on {self.host or 'this machine'} did not answer within {limit:g}s: the Rex host "
-                "is not responding (set REX_CREW_TIMEOUT to wait longer)", 4)
+                "is not responding (set REX_CREW_TIMEOUT to wait longer)")
         if check and p.returncode != 0:
             die(f"rex {' '.join(args[:3])} failed: {p.stderr.strip()[:300]}")
         return p
@@ -176,7 +185,7 @@ class Rex:
         """Run a shell script on the host in a throwaway tab; return (exit status, output)."""
         if len(script.encode()) > 60000:  # one Rex control request is limited to 65536 bytes
             die("that command is too long for the host: one Rex control request is limited to 65536 bytes. "
-                "Put it in a file in the directory and run the file", 2)
+                "Put it in a file in the directory and run the file", USAGE)
         p = self.call("run", "-s", self.session, "--label", "crew-sh", "--keep-open", "--focus=false",
                       "--json", "--wait", "--", "sh", "-c", script, check=False, wait=wait)
         try:
@@ -303,7 +312,7 @@ def mine(rex, states=LIVE):
 
 def guard(block):
     if block == SELF:
-        die("refusing to act on the orchestrator's own pane", 2)
+        die("refusing to act on the orchestrator's own pane", USAGE)
 
 
 def question(rec):
@@ -347,7 +356,7 @@ def load_policy(path):
     except (OSError, ValueError, RecursionError) as e:  # RecursionError: a file nested thousands deep, in JSON or in a pattern
         if isinstance(e, RecursionError):
             e = "nested too deeply"
-        die(f"cannot use the policy {path}: {e}. It must be {shape}. Fix the file, or leave out --policy to have nothing answered for you", 2)
+        die(f"cannot use the policy {path}: {e}. It must be {shape}. Fix the file, or leave out --policy to have nothing answered for you", USAGE)
 
 
 def opaque(body):
@@ -627,7 +636,7 @@ def start(rex, a, agent_args):
             with open(os.path.expanduser(a.task), "rb") as f:
                 task = f.read()
     except OSError as e:
-        die(f"cannot read the task: {e}", 2)
+        die(f"cannot read the task: {e}", USAGE)
     pre = getattr(a, "preamble_bytes", None)
     if pre is None and getattr(a, "preamble", None):
         pre = read_preamble(a.preamble)
@@ -650,7 +659,7 @@ def start(rex, a, agent_args):
         busy = [r for r in mine(rex, None) if same(r)
                 and (r["state"] in LIVE or (r["state"] == "starting" and time.time() - r.get("t0", 0) < 120))]
         if busy:
-            die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
+            die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", USAGE)
         claim = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "real": real,
                  "host": rex.host or "", "session": rex.session, "block": "", "state": "starting", "t0": time.time(),
                  "verify": a.verify, "verify_timeout": a.verify_timeout, "trust": a.trust, "keep": a.keep,  # what 'strays --adopt' needs
@@ -678,7 +687,7 @@ def launch(rex, a, agent_args, task, claim):
         post = f" && base64 -d < .rex-crew/task-{a.name}.b64 > .rex-crew/task-{a.name}.md && rm .rex-crew/task-{a.name}.b64" if i + step >= len(b64) else ""
         _, out = rex.sh(f"cd -- {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
         if "@@LINK" in out:
-            die(f"{a.dir}/.rex-crew is a symlink (a worker that ran there before may have planted it): nothing was written. Remove it, or use a fresh checkout", 2)
+            die(f"{a.dir}/.rex-crew is a symlink (a worker that ran there before may have planted it): nothing was written. Remove it, or use a fresh checkout", USAGE)
         if "@@PUT ok" not in out:
             die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
@@ -825,6 +834,29 @@ def answer_lines(run, res):
     return []
 
 
+def emit_json(obj):
+    print(json.dumps(obj))  # ensure_ascii: no raw control character or line break can leave a line
+
+
+def run_json(run, res, note=None):
+    """One worker as a dict for --json: the facts show() prints. What the worker wrote is in fields named worker_*."""
+    state, done = res["state"], "git" in res
+    approved = run.get("approved") or []
+    return {"name": run["name"], "state": state, "exit": exit_of(state), "seconds": int(time.time() - (run.get("t0") or time.time())),
+            "block": run.get("block", ""), "dir": run.get("dir", ""), "host": run.get("host") or "", "session": run.get("session") or "",
+            "keep": bool(run.get("keep")), "auto_approved_count": len(approved),
+            "worker_auto_approved": [oneline(x, 60) for x in approved[-5:]],
+            "kind": oneline(res.get("kind") or state, 30) if state in ("blocked", "error") else None,
+            "worker_question": clean(res.get("question") or "") if state in ("blocked", "error") else None,
+            "worker_prompt": clean(res.get("prompt") or "") if state in ("blocked", "error") else None,
+            "worker_answer_commands": answer_lines(run, res) if state in ("blocked", "error") and "block" in run else [],
+            "attention": [clean(x) for x in res.get("attention") or []],
+            "worker_git": [oneline(x, 300) for x in res["git"].splitlines()] if done else None,
+            "verify_exit": res["verify_rc"] if done else None,
+            "worker_verify_output": clean(res["verify_tail"]) if done and res["verify_rc"] not in ("0", "none") else "",
+            "worker_report": res["report"] if done else None, "note": note}
+
+
 def show(run, res, brief=False):
     """Compact, stable text for the orchestrator: facts first, the worker's words last."""
     print(f"== {run['name']}   state: {res['state']}   {int(time.time() - run['t0'])}s"
@@ -851,19 +883,23 @@ def show(run, res, brief=False):
               "report:\n" + (data(res["report"]) if res["report"] else "(none)"))
 
 
-def collect(rex, policy, timeout, only=None, rid=None, brief=False):
+def collect(rex, policy, timeout, only=None, rid=None, brief=False, as_json=False):
     """Watch every open worker of this session. Returns when all are done, or one needs a person."""
     runs = [r for r in mine(rex) if (not only or r["name"] == only) and (not rid or r["id"] == rid)]
     if not runs:
         known = [r for r in mine(rex, None) if r["name"] == only]
         if only and not known:
-            die(f"no worker named {only} in this session (see: rex-crew runs)", 6)
+            die(f"no worker named {only} in this session (see: rex-crew runs)", USAGE)
         if known:  # finished earlier: say how, with the exit code of that outcome
-            print(f"{only} already finished: state {known[-1]['state']}")
-            return EXIT.get(known[-1]["state"], 0)
-        print("no open workers in this session")
-        if elsewhere(rex):
-            print(elsewhere(rex))
+            if as_json:
+                emit_json(run_json(known[-1], {"state": known[-1]["state"]}))
+            else:
+                print(f"{only} already finished: state {known[-1]['state']}")
+            return exit_of(known[-1]["state"])
+        if not as_json:
+            print("no open workers in this session")
+            if elsewhere(rex):
+                print(elsewhere(rex))
         return 0
     t0, worst, asked, first = time.time(), 0, False, True
     base = {r["id"]: (r["state"], r.get("t0")) for r in runs}
@@ -911,13 +947,19 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False):
             if r in runs:
                 runs.remove(r)
             r["state"] = "open"  # not read yet: the next collect picks it up again
-            print(f"== {r['name']}   state: error   block: {r['block']}\nneeds you (host): could not read this worker's state or result "
-                  f"(see the message above); run collect {r['name']} again")
+            if as_json:
+                emit_json(run_json(r, {"state": "error"}, note=f"could not read this worker's state or result (see the message on stderr); run collect {r['name']} again"))
+            else:
+                print(f"== {r['name']}   state: error   block: {r['block']}\nneeds you (host): could not read this worker's state or result "
+                      f"(see the message above); run collect {r['name']} again")
             count("needs you")
             ledger_update(r, base.get(r["id"]))
             worst = max(worst, EXIT["error"])
             return
-        show(r, res, brief)
+        if as_json:
+            emit_json(run_json(r, res))
+        else:
+            show(r, res, brief)
         count("needs you" if res["state"] in ("blocked", "error") else res["state"])
         ledger_update(r, base.get(r["id"]))
         worst = max(worst, EXIT[res["state"]])
@@ -947,13 +989,17 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False):
     for r in runs:
         ledger_update(r, base.get(r["id"]))
     if runs:
-        print("still working: " + ", ".join(r["name"] for r in runs))
-        worst = worst or 3
-    if brief:
+        if as_json:
+            for r in runs:
+                emit_json(run_json(r, {"state": "working"}))
+        else:
+            print("still working: " + ", ".join(r["name"] for r in runs))
+        worst = max(worst, EXIT["timeout"])  # an unclean result must not hide that someone is still working
+    if brief and not as_json:
         order = ("done", "unclean", "needs you", "gone", "timeout")
         parts_ = [f"{tally[k]} {k}" for k in order if tally.get(k)] + ([f"{len(runs)} still working"] if runs else [])
         print(", ".join(parts_) or "nothing reported")
-    return 2 if asked else worst  # a question for you outranks every other code
+    return EXIT["blocked"] if asked else worst  # a question for you outranks every other code
 
 
 # ---- commands ----------------------------------------------------------------------------------------
@@ -970,7 +1016,7 @@ def cmd_run(rex, a):
 
 
 def cmd_collect(rex, a):
-    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name, brief=a.brief))
+    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name, brief=a.brief, as_json=a.json))
 
 
 def elsewhere(rex):
@@ -988,12 +1034,17 @@ def cmd_runs(rex, a):
     shown = ledger_load() if a.all or not rex.session else mine(rex, None)
     for r in shown[-a.last:]:
         t0 = r.get("t0")
+        if a.json:
+            emit_json({"state": r["state"], "name": r["name"], "started": r.get("started", ""), "host": r["host"], "dir": r["dir"],
+                       "block": "" if r["state"] in ("done", "closed", "gone") else r["block"], "session": r["session"],
+                       "age_seconds": int(max(0, time.time() - t0)) if isinstance(t0, (int, float)) else None})
+            continue
         age = "-" if not isinstance(t0, (int, float)) else (f"{int(max(0, time.time() - t0) // 86400)}d" if time.time() - t0 >= 86400
                                                            else f"{int(max(0, time.time() - t0) // 3600)}h" if time.time() - t0 >= 3600
                                                            else f"{int(max(0, time.time() - t0) // 60)}m")
         print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
                          "" if r["state"] in ("done", "closed", "gone") else r["block"], r["session"] or "-", age]))
-    if not shown and elsewhere(rex):
+    if not shown and not a.json and elsewhere(rex):
         print(elsewhere(rex))
 
 
@@ -1019,12 +1070,12 @@ def checkout(rex, name, repo, base="HEAD", branch=None, copy=()):
         ex = re.search(r"^@@EXISTS (.+)$", out, re.M)
         if ex:
             die(f"checkout failed: {ex.group(1).strip()} already exists (a worker of that name has a checkout): use it, "
-                "or remove it with `git worktree remove` first, or pick another NAME", 2)
+                "or remove it with `git worktree remove` first, or pick another NAME", USAGE)
         if "@@COPYFAIL" in out:
             die(f"checkout failed while copying: {out.replace('@@COPYFAIL', '').strip()[-300:]}\n"
                 "the new worktree and branch were removed again; fix the --copy path and retry")
         if "already exists" in out:
-            die(f"checkout failed: the branch {branch or 'crew/' + name} already exists: pass --branch, or delete the old branch. {out.strip()[-200:]}")
+            die(f"checkout failed: the branch {branch or 'crew/' + name} already exists: pass --branch, or delete the old branch. {out.strip()[-200:]}", USAGE)
         die(f"checkout failed: {out.strip()[-300:]}")
     return hit.group(1).strip()
 
@@ -1037,7 +1088,9 @@ def cmd_sh(rex, a):
     else:  # the terminal keeps only its last lines: say that the start of the output is missing
         warn("the output is cut: the host's terminal kept only its last lines, the beginning is missing")
     print(out.rstrip())
-    sys.exit(rc)
+    if rc:  # the command's own status is not one of the codes above (2 would read as "needs you"): say it, exit unclean
+        warn(f"the command exited with status {rc}")
+    sys.exit(EXIT["unclean"] if rc else 0)
 
 
 def cmd_send(rex, a):
@@ -1045,7 +1098,7 @@ def cmd_send(rex, a):
     state = rex.status(a.block).get("state")
     if state not in ("done", "idle"):
         die(f"not sent: the worker is {state or 'not reporting'}, not at its prompt (a stray Return would answer its dialog). "
-            f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`", 6)
+            f"Wait with `rex-crew collect`; if it is blocked, use approve, deny or answer; see `rex-crew status`", USAGE)
     rex.type(a.block, " ".join(a.text))
     time.sleep(1)  # let the TUI draw the text before Return
     rex.key(a.block, "enter")
@@ -1058,13 +1111,13 @@ def cmd_approve(rex, a):
     try:
         wanted = re.compile(a.match or "")
     except re.error as e:
-        die(f"--match is not a regular expression: {e}", 2)
+        die(f"--match is not a regular expression: {e}", USAGE)
     rec = rex.status(a.block)
     kind, text = question(rec)
     if a.match and not wanted.search(text):
-        die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", 7)
+        die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", EXIT["blocked"])
     if not approve_once(rex, a.block, text):
-        die("no permission prompt open, or not a Claude Code pane. See `rex-crew status` for what the pane is doing", 6)
+        die("no permission prompt open, or not a Claude Code pane. See `rex-crew status` for what the pane is doing", USAGE)
     for r in mine(rex, KEEPS_PANE):
         if r["block"] == a.block:  # a collect right after must not press for this same prompt again
             last, n, at = r.get("press") or ["", 0, 0]
@@ -1078,13 +1131,13 @@ def cmd_answer(rex, a):
     guard(a.block)
     rec = rex.status(a.block)
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
-        die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", 6)
+        die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", USAGE)
     if re.fullmatch(r"[0-9]+", a.choice) and not a.text:
         rex.type(a.block, a.choice)
     else:
         free = re.search(r"(\d+)\. Type something", rex.screen(a.block, 30))
         if not free:
-            die("this question takes no free text; answer with an option number (`rex-crew screen BLOCK` shows them)", 6)
+            die("this question takes no free text; answer with an option number (`rex-crew screen BLOCK` shows them)", USAGE)
         rex.type(a.block, free.group(1))
         time.sleep(1)
         rex.type(a.block, a.choice)
@@ -1096,7 +1149,7 @@ def cmd_answer(rex, a):
 def cmd_deny(rex, a):
     guard(a.block)
     if rex.status(a.block).get("state") != "blocked":
-        die("nothing to deny: the worker is not blocked. See `rex-crew status`", 6)
+        die("nothing to deny: the worker is not blocked. See `rex-crew status`", USAGE)
     rex.key(a.block, "escape")
 
 
@@ -1114,6 +1167,10 @@ def cmd_status(rex, a):
         if not rec and not a.all:
             continue
         kind, text = question(rec)
+        if a.json:
+            emit_json({"worker_state": clean(rec["state"]) if "state" in rec else None, "worker_label": clean(b["label"]) if "label" in b else None,
+                       "block": clean(b["block_id"]), "worker_kind": clean(kind), "worker_question": clean(text)})
+            continue
         print("\t".join([oneline(rec.get("state", "-"), 30), oneline(b.get("label", "-"), 60), oneline(b["block_id"], 60), oneline(kind + " " + text, 100)]))
 
 
@@ -1171,7 +1228,7 @@ PLAN_KEYS = {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", 
 def load_plan(path):
     """The plan, checked completely before anything is created: a typo must not become half a fan-out."""
     def bad(msg):
-        die(f"cannot use the plan {path}: {msg}", 2)
+        die(f"cannot use the plan {path}: {msg}", USAGE)
     def beside(rel):  # a file named in the plan is relative to the plan, so a plan and its files can be moved together
         with open(os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(path))), os.path.expanduser(rel)), "rb") as f:
             return f.read()
@@ -1271,7 +1328,7 @@ def cmd_fanout(rex, a):
     names = [w["name"] for w in plan["workers"]]
     live = sorted({r["name"] for r in mine(rex)} & set(names))
     if live:
-        die(f"a live worker named {live[0]} already exists in this session: collect or close it, or pick another NAME", 2)
+        die(f"a live worker named {live[0]} already exists in this session: collect or close it, or pick another NAME", USAGE)
     m, repo = f"@@{os.urandom(6).hex()}", plan["repo"]
     bq = shlex.quote(plan["base"] + "^{commit}")
     check = "".join(f"wt=\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{n}\"; "
@@ -1283,7 +1340,7 @@ def cmd_fanout(rex, a):
                           f"git rev-parse --verify -q {bq} >/dev/null 2>&1 || echo {m}ERR base {shlex.quote(plan['base'])} is not a commit in the repository; "
                           f"{check}echo {m}READY", repo, m)
     if errs:
-        die("plan refused, nothing was created: " + "; ".join(errs), 2)
+        die("plan refused, nothing was created: " + "; ".join(errs), USAGE)
     made, runs, inflight = [], [], None
     try:
         for w in plan["workers"]:
@@ -1324,7 +1381,7 @@ def watched(cmd, vt, m):
     # tree PID prints PID first, then all its descendants, from one process-table snapshot; kt signals that whole list at once,
     # so it does not matter in which order the processes die. The watchdog takes the list once and reuses it for KILL,
     # because after TERM the survivors are no longer children of PID.
-    return ("tree() { ps -A -o pid= -o ppid= | awk -v p=\"$1\" '{ q[NR]=$1; pp[$1]=$2 } END { a[p]=1; do { c=0; for (i=1;i<=NR;i++) if (!(q[i] in a) && (pp[q[i]] in a)) { a[q[i]]=1; c=1 } } while (c); print p; for (x in a) if (x != p) print x }'; }; "
+    return ("tree() { { ps -A -o pid= -o ppid= 2>/dev/null || ps -o pid= -o ppid=; } | awk -v p=\"$1\" '{ q[NR]=$1; pp[$1]=$2 } END { a[p]=1; do { c=0; for (i=1;i<=NR;i++) if (!(q[i] in a) && (pp[q[i]] in a)) { a[q[i]]=1; c=1 } } while (c); print p; for (x in a) if (x != p) print x }'; }; "
             "kt() { kill -s \"$2\" $(tree \"$1\") 2>/dev/null; }; "
             "vf=$(mktemp \"${TMPDIR:-/tmp}/rex-crew-verify.XXXXXX\") || exit 96; "
             f"( unset -f git; {cmd}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
@@ -1338,9 +1395,9 @@ def cmd_integrate(rex, a):
     for n in names:
         check_name(n)
     if len(set(names)) != len(names):
-        die(f"{next(n for n in names if names.count(n) > 1)} is listed twice", 2)
+        die(f"{next(n for n in names if names.count(n) > 1)} is listed twice", USAGE)
     if a.verify is not None and not a.verify.strip():
-        die("--verify is empty: give a command, or leave the option out for no check", 2)
+        die("--verify is empty: give a command, or leave the option out for no check", USAGE)
     at_least_one(a.verify_timeout, "--verify-timeout")
     m, repo = f"@@{os.urandom(6).hex()}", shlex.quote(a.repo)
     brs = ["crew/" + n for n in names]
@@ -1359,7 +1416,7 @@ def cmd_integrate(rex, a):
            + f"echo {m}READY")
     errs = preflight(rex, pre, a.repo, m)
     if errs:
-        die("nothing was merged: " + "; ".join(errs), 2)
+        die("nothing was merged: " + "; ".join(errs), EXIT["blocked"])
     vt, stopped, empty = int(a.verify_timeout), None, []
     for i, br in enumerate(brs):
         m = f"@@{os.urandom(6).hex()}"
@@ -1451,6 +1508,12 @@ def selftest():
     print("selftest ok")
 
 
+class Parser(argparse.ArgumentParser):
+    def error(self, message):  # argparse exits 2, which here means "needs you": a usage error has its own code
+        self.print_usage(sys.stderr)
+        die(f"{self.prog}: error: {message}", USAGE)
+
+
 def main():
     if sys.argv[1:2] == ["selftest"]:
         return selftest()
@@ -1468,8 +1531,8 @@ def main():
         i = argv.index("--")
         argv, agent_args = argv[:i], argv[i + 1:]
     raw = argparse.RawDescriptionHelpFormatter
-    p = argparse.ArgumentParser(prog="rex-crew", description=__doc__.split("\n\n")[0], formatter_class=raw,
-                                epilog="exit: 0 clean, 1 unclean, 2 needs you or input refused, 3 timeout, 4 error, 5 pane gone, 6 unknown NAME\n"
+    p = Parser(prog="rex-crew", description=__doc__.split("\n\n")[0], formatter_class=raw,
+                                epilog="exit: 0 clean, 1 unclean, 2 needs you, 3 timeout, 4 error (host failure too), 5 pane gone, 6 usage (bad input, unknown NAME)\n"
                                        "rex-crew selftest   check the policy matcher (needs no Rex)\n"
                                        "rex-crew COMMAND --help   options of one command")
     p.add_argument("-S", "--host", default=os.environ.get("REX_CREW_HOST"), help="Rex host label (default: this machine)")
@@ -1488,6 +1551,7 @@ def main():
 
     policy_help = "JSON policy file: {approve: [regex], never: [regex]}; without it nothing is answered for you"
     brief_help = "per worker only: header, ATTENTION, git, verify, the report's CHANGED and OPEN (capped); then a one-line tally"
+    json_help = "one JSON object per line and per worker instead of text (same facts; the worker's own words are in fields named worker_*); exit codes unchanged"
     claude_args = "usage: rex-crew run NAME DIR TASK [options] -- CLAUDE_ARGS\neverything after a bare -- goes to claude, e.g. -- --permission-mode acceptEdits"
     r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it", epilog=claude_args, formatter_class=raw)
     task_args(r); r.add_argument("--policy", help=policy_help)
@@ -1498,9 +1562,11 @@ def main():
     c = sub.add_parser("collect", help="wait for the open workers: answer routine prompts, report each as it ends; exit 2 when one needs you")
     c.add_argument("name", nargs="?", help="only this worker"); c.add_argument("--policy", help=policy_help)
     c.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3 and name who is still working")
-    c.add_argument("--brief", action="store_true", help=brief_help); c.set_defaults(fn=cmd_collect)
+    c.add_argument("--brief", action="store_true", help=brief_help)
+    c.add_argument("--json", action="store_true", help=json_help); c.set_defaults(fn=cmd_collect)
     ru = sub.add_parser("runs", help="what was started in this session (ledger), newest last")
-    ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int, default=20, help="show this many (default 20)"); ru.set_defaults(fn=cmd_runs)
+    ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int, default=20, help="show this many (default 20)")
+    ru.add_argument("--json", action="store_true", help=json_help); ru.set_defaults(fn=cmd_runs)
     co = sub.add_parser("checkout", help="git worktree for one worker on its own branch; prints its path")
     co.add_argument("name", help="worker name; the branch is crew/NAME"); co.add_argument("repo", help="repository on the host; a relative path is relative to the host's directory")
     co.add_argument("--base", default="HEAD", help="start the branch here (default HEAD)"); co.add_argument("--branch", help="branch name (default crew/NAME)")
@@ -1510,7 +1576,7 @@ def main():
     se = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
     se.add_argument("block", help="the worker's pane id"); se.add_argument("text", nargs="+", help="the message"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
-    ap.add_argument("block"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 7)"); ap.set_defaults(fn=cmd_approve)
+    ap.add_argument("block"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 2: it needs you)"); ap.set_defaults(fn=cmd_approve)
     an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
     an.add_argument("block"); an.add_argument("choice")
     an.add_argument("--text", action="store_true", help="CHOICE is free text, even if it is only digits (e.g. a year)"); an.set_defaults(fn=cmd_answer)
@@ -1519,7 +1585,8 @@ def main():
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)
     sc.set_defaults(fn=cmd_screen)
     st = sub.add_parser("status", help="every reporting pane in the session: state, label, block, open question")
-    st.add_argument("--all", action="store_true", help="also panes that report no status"); st.set_defaults(fn=cmd_status)
+    st.add_argument("--all", action="store_true", help="also panes that report no status")
+    st.add_argument("--json", action="store_true", help=json_help); st.set_defaults(fn=cmd_status)
     sy = sub.add_parser("strays", help="panes of the session that no ledger entry knows (a start that died half way); --adopt or --close")
     sg = sy.add_mutually_exclusive_group()
     sg.add_argument("--adopt", action="store_true", help="record panes that a recent start claimed as open workers"); sg.add_argument("--close", action="store_true", help="close panes that a recent start claimed")
@@ -1546,7 +1613,7 @@ def main():
         setattr(a, literal[0], literal[1])
     session = a.session or (None if a.host else os.environ.get("REX_SESSION"))
     if not session and a.cmd not in ("session", "runs"):
-        die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", 2)
+        die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", USAGE)
     a.fn(Rex(a.host, session), a)
 
 

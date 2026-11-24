@@ -110,7 +110,7 @@ class Real(Base):
 
     def test_oversized_sh_command_says_why(self):
         code, out, err = self.cli("sh", "echo " + "x" * 70000)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("65536", err)
 
     def test_long_task_still_arrives(self):

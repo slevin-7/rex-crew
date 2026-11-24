@@ -215,7 +215,7 @@ class TestStartAndSend(Base):
         self.script("w1", rec("working"))
         self.assertEqual(self.cli("start", "w1", d, self.task)[0], 0)
         code, _, err = self.cli("start", "w2", d, self.task)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("one worker per directory", err)
         self.assertEqual([r["name"] for r in self.ledger_runs()], ["w1"])
         # another directory is fine
@@ -223,7 +223,7 @@ class TestStartAndSend(Base):
 
     def test_bad_name_is_refused(self):
         code, _, err = self.cli("start", "Bad Name", self.workdir(), self.task)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
 
     def test_send_refused_while_working(self):
         d = self.workdir()
@@ -249,7 +249,7 @@ class TestStartAndSend(Base):
         blk = self.block_of("w1")
         with mock.patch.object(self.mod, "SELF", blk):
             code, _, _ = self.cli("send", blk, "hi")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertEqual(self.sent(), [])
 
 
@@ -265,7 +265,7 @@ class TestLedger(Base):
         self.assertIn(blk, p.stdout)
         # and a fresh process still refuses a second worker in that directory
         p = subprocess.run([sys.executable, SCRIPT, "start", "w2", d, self.task], capture_output=True, text=True, env=self.env)
-        self.assertEqual(p.returncode, 2)
+        self.assertEqual(p.returncode, 6)
 
     def test_collect_in_new_process_finishes_worker_started_earlier(self):
         d = self.workdir()

@@ -27,7 +27,7 @@ class Review(Base):
         self.script("w2", rec("working"))
         with mock.patch.object(self.mod.Rex, "status", flaky):
             code, out, err = self.cli("start", "w2", d, self.task)
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertEqual(self.state_of("w1"), "open")
 
     def test_really_gone_pane_still_frees_the_directory(self):
@@ -42,7 +42,7 @@ class Review(Base):
         self.assertEqual(self.state_of("w1"), "error")
         self.script("w2", rec("working"))
         code, out, err = self.cli("start", "w2", d, self.task)
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
 
     def test_close_marks_an_errored_worker_closed(self):
         self.start("w1", [rec("error", msg="overloaded")])

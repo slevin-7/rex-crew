@@ -12,7 +12,7 @@ class Small(Base):
         for v in ("0", "-5"):
             d = self.workdir("w" + v.strip("-"))
             code, out, err = self.cli("start", "w1", d, self.task, "--verify", "true", "--verify-timeout", v)
-            self.assertEqual(code, 2, f"{v}: {out}{err}")
+            self.assertEqual(code, 6, f"{v}: {out}{err}")
             self.assertIn("--verify-timeout", err)
         self.assertEqual(self.fake()["blocks"], {})
 
@@ -20,7 +20,7 @@ class Small(Base):
         self.script("w1", rec("blocked", "permission", "approve Bash: ls"))
         self.assertEqual(self.cli("start", "w1", self.workdir(), self.task)[0], 0)
         code, out, err = self.cli("approve", self.block_of("w1"), "--match", "(")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertIn("--match", err)
         self.assertEqual(self.sent(), [])
 
@@ -29,13 +29,13 @@ class Small(Base):
         self.assertEqual(self.cli("start", "w1", self.workdir(), self.task)[0], 0)
         for v in ("0", "-1"):  # -1 used to hide the oldest run, 0 meant 20
             code, out, err = self.cli("runs", "--last", v)
-            self.assertEqual(code, 2, f"{v}: {out}{err}")
+            self.assertEqual(code, 6, f"{v}: {out}{err}")
             self.assertIn("--last", err)
 
     def test_screen_lines_must_be_positive(self):
         for v in ("0", "-3"):  # a negative count used to skip the first lines, 0 printed everything
             code, out, err = self.cli("screen", "b1", v)
-            self.assertEqual(code, 2, f"{v}: {out}{err}")
+            self.assertEqual(code, 6, f"{v}: {out}{err}")
             self.assertIn("LINES", err)
 
 

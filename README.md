@@ -67,7 +67,7 @@ rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout
 # several at once: one checkout each, start all, collect
 A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
 rex-crew start api "$A" api.md --verify 'npm test' --trust -- --permission-mode acceptEdits
-rex-crew collect --policy policy.json   # reports each worker as it ends; exits 2 when one needs you
+rex-crew collect --policy policy.json   # reports each worker as it ends; exits 2 when one needs you (add `--json` for one JSON object per worker)
 rex-crew collect --brief                # per worker: header, ATTENTION, git, verify, only CHANGED and OPEN; ends with "3 done, 1 unclean, 1 needs you"
 
 # or from one plan file: all checkouts and workers, or nothing; then merge the branches back
@@ -89,7 +89,7 @@ rex-crew status                      # every reporting pane: state and open ques
 rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start killed half way): list; adopt or close those a recent start claimed
 ```
 
-`fanout` reads a plan like this; it refuses the whole plan (exit 2) before creating anything if a name, path, task or option is invalid
+`fanout` reads a plan like this; it refuses the whole plan (exit 6) before creating anything if a name, path, task or option is invalid
 (including a misspelled key), and removes what it created if a later step fails:
 
 ```jsonc
@@ -100,7 +100,7 @@ rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start kill
 ```
 
 `--preamble FILE` (on `start`, `run`, `fanout`; in a plan: `"preamble": "file.md"`, relative to the plan, the option wins) appends your standing
-instructions to every task, just before the report protocol. The file must exist and not be empty, or nothing is started (exit 2). The protocol itself
+instructions to every task, just before the report protocol. The file must exist and not be empty, or nothing is started (exit 6). The protocol itself
 tells workers which read commands pass without waiting (plain `git status`, `grep`, `sed -n`) and which do not (`sh -c`, `<( )`, `$( )`, env prefixes).
 
 `--brief` shortens what `collect` and `run` print and leaves exit codes alone: a section missing from a report is said so
@@ -110,12 +110,16 @@ Control characters in a worker's text (ESC, a lone CR) are shown as `?`, and its
 
 `integrate` merges `crew/api`, `crew/docs` into the branch REPO has checked out, one at a time, and prints per branch `merged`, `conflict:` with the
 files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (already merged, or the worker committed nothing). It stops at the first conflict or
-failed verify with a clean tree (exit 1). The merge is committed only after the verify passed, and files the verify leaves in the tree are removed (the line says how many). It refuses up front (exit 2) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
+failed verify with a clean tree (exit 1). The merge is committed only after the verify passed, and files the verify leaves in the tree are removed (the line says how many). It refuses up front (exit 2, a person has to look) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
 `skills/rex-crew/SKILL.md` has the details.
 
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or
 oversized report, failed or hung verify, uncommitted changes, host output cut; the pane stays open so you can `screen` and `send`), `2` needs you,
-`3` timeout (`--timeout` seconds, default 900), `4` error, `5` pane gone, `6` unknown NAME. A `--policy` file that is missing or malformed exits `2` before any pane opens, and so does a `--verify-timeout`, `runs --last` or `screen` line count below 1 or an `approve --match` that is not a regular expression. Other commands exit `1` when a host call fails.
+`3` timeout (`--timeout` seconds, default 900, also when an unclean result comes with a worker still running), `4` error, `5` pane gone, `6` usage. The same table holds for every command: `4` is also a failed or silent host call (or no `rex` on PATH), `6` is input refused before anything started (a bad option, an unknown NAME, a `--policy` file that is missing or malformed, a `--verify-timeout`, `runs --last` or `screen` line count below 1, an `approve --match` that is not a regular expression, a plan that is refused) or a command that does not apply (`send`, `answer`, `deny`, `approve` with nothing to act on), and `2` is also an `approve --match` that differs from the open prompt and an `integrate` that finds REPO not ready. `sh` exits `0`, or `1` with the command's status on stderr. `collect NAME` for a worker closed by hand exits `5`.
+
+The scripts that run on the host use only `sh`, `awk`, `tr`, `wc`, `head -c`, `tail -c`, `base64` (`-d` to decode), `mktemp`, `kill` and `ps` (`ps -A -o pid= -o ppid=`, or without `-A` where that option does not exist, as in busybox) and git 2.22 or newer (`git branch --show-current`). They are run on macOS; on Linux (GNU coreutils, busybox) they were only reasoned through.
+
+`collect`, `runs` and `status` take `--json`: one JSON object per line and per worker, the same facts as the text and the same exit codes. What a worker wrote (its report, question, prompt, label, state, verify output, git line) is only in fields named `worker_*`; every other field is this tool's own. Workers still running are objects with `"state": "working"`.
 `collect` hands back as soon as any worker needs you and then exits 2, whatever the other workers' codes (a question outranks an error).
 Before it hands back it serves the other workers for up to three more passes (about 12 s) as long as it is still pressing
 routine keys for them, so a question does not stall them; after you answer, run `collect` again at once. A host failure on one
@@ -136,7 +140,7 @@ Patterns are matched against the prompt as the agent reports it, such as `Bash: 
 [`policy.example.json`](policy.example.json) is a starting point. This is a convenience for routine prompts,
 not a sandbox: a pattern that is too wide approves too much. `approve` patterns are matched from the start of the prompt (write `^`
 anyway). A policy file that is missing, not JSON, of the wrong shape or has an invalid pattern stops `run` and `collect` with a clear error
-(exit 2) naming the file and the pattern; `run` checks it before it starts the worker. Never answered for you: `Write:`/`Edit:` paths with
+(exit 6) naming the file and the pattern; `run` checks it before it starts the worker. Never answered for you: `Write:`/`Edit:` paths with
 `..` or a line break, and Bash text that uses `$VAR`, brace lists, or a glob in a hidden or directory segment (`~/.s?h/`, `/e?c/`).
 
 ## Limits
