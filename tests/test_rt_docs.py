@@ -163,7 +163,7 @@ class TestDocumentedOutput(Base):
             # the documented line has the same fields as the real one (names differ, shape does not)
             self.assertEqual(doc_line.count(" · "), real_line.count(" · "), f"docs show: {doc_line!r}, tool prints: {real_line!r}")
         for key in ("STATUS:", "CHANGED:", "VERIFIED:", "COMMIT:", "OPEN:", "NEXT:"):
-            self.assertTrue(any(l.startswith(key) for l in shown))
+            self.assertTrue(any(l.startswith("| " + key) for l in shown))  # report lines are delimited as data
         self.assertTrue(any(l.startswith("auto-approved (") for l in shown))
         # README shows the same example
         readme_git = [l for l in README.splitlines() if l.startswith("git: ")][0]

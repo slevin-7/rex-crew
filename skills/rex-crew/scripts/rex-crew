@@ -47,8 +47,14 @@ def read_preamble(path):
 
 def clean(text):
     """Worker text as display text: CRLF becomes LF; other control characters (ESC, a lone CR that overwrites the
-    line, NUL) become '?', so a worker cannot clear the screen or hide a line it wrote."""
-    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "?", str(text).replace("\r\n", "\n"))
+    line, NUL), the 8-bit C1 controls (a lone 0x9b is a CSI on some terminals), line/paragraph separators and bidi
+    overrides become '?', so a worker cannot clear the screen, hide a line it wrote or reorder what is shown."""
+    return re.sub("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]", "?", str(text).replace("\r\n", "\n"))
+
+
+def data(text, indent=""):
+    """A worker's text as delimited data: every line starts with '| ', so none can read as one of this tool's own lines."""
+    return "\n".join(indent + "| " + l for l in clean(text).split("\n"))
 
 
 def oneline(text, n):
@@ -616,10 +622,14 @@ def launch(rex, a, agent_args, task, claim):
     # Rex limits one request to 64 KiB, so a long task travels in pieces.
     step = 30000
     for i in range(0, len(b64), step):
-        pre = (f"mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md .rex-crew/task-{a.name}.b64 && "
-               "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || echo '.rex-crew/' >> \"$x/info/exclude\"; }; ") if i == 0 else ""
+        # a directory a worker used before may hold planted symlinks: never write through them
+        pre = ("if [ -L .rex-crew ]; then echo '@@LINK .rex-crew is a symlink'; exit 1; fi; "
+               f"mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md .rex-crew/task-{a.name}.b64 .rex-crew/task-{a.name}.md && "
+               "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || [ -L \"$x/info/exclude\" ] || echo '.rex-crew/' >> \"$x/info/exclude\"; }; ") if i == 0 else ""
         post = f" && base64 -d < .rex-crew/task-{a.name}.b64 > .rex-crew/task-{a.name}.md && rm .rex-crew/task-{a.name}.b64" if i + step >= len(b64) else ""
         _, out = rex.sh(f"cd -- {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
+        if "@@LINK" in out:
+            die(f"{a.dir}/.rex-crew is a symlink (a worker that ran there before may have planted it): nothing was written. Remove it, or use a fresh checkout", 2)
         if "@@PUT ok" not in out:
             die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
@@ -688,7 +698,7 @@ def finish(rex, run):
                   f"( {verify}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
                   f"( sleep {vt}; : > \"$vf.to\"; kt $vp TERM; sleep 3; kt $vp KILL ) </dev/null >/dev/null 2>&1 & wp=$!; "
                   f"wait $vp 2>/dev/null; rc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then rc=timeout; fi; "
-                  f"tail -n 15 \"$vf\" | tail -c 4000; rm -f \"$vf\" \"$vf.to\"; echo {m}RC $rc" if verify else f"echo {m}RC none"))
+                  f"tail -n 15 \"$vf\" | tail -c 4000 | awk '{{gsub(/@@/,\"@ @\"); print}}'; rm -f \"$vf\" \"$vf.to\"; echo {m}RC $rc" if verify else f"echo {m}RC none"))
     # the verify command may run up to vt seconds: the call waits that long on top
     rc0, out = rex.sh(script, **({"wait": rpc_timeout() + vt + 10} if verify else {}))
     part = lambda x, y: out.split(x, 1)[-1].split(y, 1)[0].strip() if x in out else ""
@@ -784,20 +794,21 @@ def show(run, res, brief=False):
     if run.get("approved") and not brief:
         print(f"auto-approved ({len(run['approved'])}): " + " | ".join(oneline(x, 60) for x in run["approved"][-5:]))
     if res["state"] in ("blocked", "error"):
-        ask = clean(res.get("question") or "(no message; look at the pane)").replace("\n", "\n    ")
-        print(f"needs you ({res.get('kind') or res['state']}): {ask}")
+        first, _, rest = clean(res.get("question") or "(no message; look at the pane)").partition("\n")
+        print(f"needs you ({oneline(res.get('kind') or res['state'], 30)}): {first}" + ("\n" + data(rest, "    ") if rest else ""))
         for x in answer_lines(run, res):
             print("  " + x)
     if "git" in res:
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
-        print("git: " + " · ".join(res["git"].splitlines()))
+        print("git: " + " · ".join(oneline(x, 300) for x in res["git"].splitlines()))
         if res["verify_rc"] != "none":
             tail = clean(res["verify_tail"])
             if brief:
                 tail = "\n".join(oneline(l, BRIEF_WIDTH) for l in tail.splitlines()[-6:])
-            print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + tail))
-        print(brief_report(res["report"]) if brief and res["report"] else "report:\n" + (res["report"] or "(none)"))
+            print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + (data(tail) if tail.strip() else "(no output)")))
+        print(brief_report(res["report"]) if brief and res["report"] else
+              "report:\n" + (data(res["report"]) if res["report"] else "(none)"))
 
 
 def collect(rex, policy, timeout, only=None, rid=None, brief=False):
@@ -1036,7 +1047,7 @@ def cmd_status(rex, a):
         if not rec and not a.all:
             continue
         kind, text = question(rec)
-        print("\t".join([str(rec.get("state", "-")), str(b.get("label", "-")), str(b["block_id"]), (kind + " " + text).strip()[:100]]))
+        print("\t".join([oneline(rec.get("state", "-"), 30), oneline(b.get("label", "-"), 60), oneline(b["block_id"], 60), oneline(kind + " " + text, 100)]))
 
 
 def cmd_close(rex, a):
@@ -1194,10 +1205,10 @@ def watched(cmd, vt, m):
     """Shell text: run CMD with a watchdog; prints its last lines, then VRC with the exit status (or timeout)."""
     return ("kt() { set -- \"$1\" \"$2\" $(ps -A -o pid= -o ppid= | awk -v p=\"$1\" '$2==p{print $1}'); kill -s \"$2\" \"$1\" 2>/dev/null; s=$2; shift 2; for c; do kt \"$c\" \"$s\"; done; }; "
             "vf=$(mktemp \"${TMPDIR:-/tmp}/rex-crew-verify.XXXXXX\") || exit 96; "
-            f"( {cmd}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
+            f"( unset -f git; {cmd}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
             f"( sleep {vt}; : > \"$vf.to\"; kt $vp TERM; sleep 3; kt $vp KILL ) </dev/null >/dev/null 2>&1 & wp=$!; "
             f"wait $vp 2>/dev/null; vrc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then vrc=timeout; fi; "
-            f"echo {m}VOUT; tail -n 15 \"$vf\" | tail -c 4000; rm -f \"$vf\" \"$vf.to\"; echo {m}VRC $vrc; ")
+            f"echo {m}VOUT; tail -n 15 \"$vf\" | tail -c 4000 | awk '{{gsub(/@@/,\"@ @\"); print}}'; rm -f \"$vf\" \"$vf.to\"; echo {m}VRC $vrc; ")
 
 
 def cmd_integrate(rex, a):
@@ -1213,7 +1224,12 @@ def cmd_integrate(rex, a):
         die("--verify-timeout must be at least 1 second", 2)
     m, repo = f"@@{os.urandom(6).hex()}", shlex.quote(a.repo)
     brs = ["crew/" + n for n in names]
-    pre = (f"cd -- {repo} || exit 97; export LC_ALL=C; "
+    # The worker shares this repository's .git: its hooks and config are the worker's to write. Every git call here runs
+    # with hooks off and no fsmonitor; the user's verify command gets the plain git back (see watched).
+    safe = "git() { command git -c core.hooksPath=/dev/null -c core.fsmonitor=false \"$@\"; }; "
+    risky = ("^(filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|diff\\..*\\.(textconv|command)|diff\\.external)$")
+    pre = (f"cd -- {repo} || exit 97; export LC_ALL=C; {safe}"
+           f"w=$(git config --local --name-only --get-regexp '{risky}' 2>/dev/null | tr '\\n' ' '); [ -z \"$w\" ] || echo {m}WARN $w; "
            f"git rev-parse --git-dir >/dev/null 2>&1 || {{ echo {m}ERR {repo} is not a git repository; exit 1; }}; "
            f"cur=$(git branch --show-current); [ -n \"$cur\" ] || echo {m}ERR HEAD is detached: check out the branch that should receive the merges; "
            f"for x in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD rebase-merge rebase-apply; do [ -e \"$(git rev-parse --git-path $x)\" ] && echo {m}ERR a $x operation is in progress: finish or abort it first; done; "
@@ -1222,6 +1238,10 @@ def cmd_integrate(rex, a):
                      f"[ \"$cur\" = {b} ] && echo {m}ERR {b} is the current branch: it cannot be merged into itself; " for b in brs)
            + f"echo {m}READY")
     rc, out = rex.sh(pre)
+    warn = [w for w in re.findall("^" + re.escape(m) + r"WARN (.*)$", out, re.M)[:1] for w in w.split() if not w.startswith("filter.lfs.")]
+    if warn:
+        print("WARNING: this repository's own config defines commands that git runs while merging (" + oneline(" ".join(warn), 200)
+              + "); a worker that can write the shared .git may have planted them. Check `git config --local --list` before you trust this merge")
     errs = re.findall("^" + re.escape(m) + r"ERR (.*)$", out, re.M)
     if rc == 97:
         errs = [f"the repository {a.repo} was not found on the host"]
@@ -1234,7 +1254,7 @@ def cmd_integrate(rex, a):
         m = f"@@{os.urandom(6).hex()}"
         ver = (watched(a.verify, vt, m) + "if [ \"$vrc\" != 0 ]; then git reset -q --hard \"$before\"; git clean -fdq; fi; ") if a.verify else ""
         rc, out = rex.sh(
-            f"cd -- {repo} || exit 97; export LC_ALL=C; before=$(git rev-parse HEAD) || exit 96; "
+            f"cd -- {repo} || exit 97; export LC_ALL=C; {safe}before=$(git rev-parse HEAD) || exit 96; "
             f"sha=$(git rev-parse --verify -q refs/heads/{br}) || {{ echo {m}GONE; exit 0; }}; "
             f"wtp=$(git worktree list --porcelain | awk -v b=refs/heads/{br} '/^worktree /{{p=substr($0,10)}} $1==\"branch\" && $2==b {{print p}}'); "
             f"if [ -n \"$wtp\" ]; then echo {m}WTDIRTY $(git -C \"$wtp\" status --porcelain 2>/dev/null | wc -l | tr -d ' '); fi; "
@@ -1252,7 +1272,7 @@ def cmd_integrate(rex, a):
         if dirty and dirty.group(1) != "0":
             note = f"\n  warning: its checkout has {dirty.group(1)} uncommitted path(s) that are NOT in the branch"
         if not end or m + "END" not in out:
-            print(f"{br}: unknown: the host's output is incomplete; check git status in {a.repo}{note}")
+            print(f"{br}: unknown: the host's output is incomplete; check git status in {oneline(a.repo, 200)}{note}")
             stopped = (br, EXIT["error"], None)
         elif m + "GONE" in out:
             print(f"{br}: unknown: the branch disappeared")
@@ -1262,9 +1282,9 @@ def cmd_integrate(rex, a):
             total = re.search("^" + re.escape(m) + r"NCONF (\d+)$", out, re.M)
             if files:
                 more = int(total.group(1)) - len(files) if total else 0
-                print(f"{br}: conflict: " + ", ".join(files) + (f" and {more} more" if more > 0 else "") + note)
+                print(f"{br}: conflict: " + ", ".join(oneline(f, 200) for f in files) + (f" and {more} more" if more > 0 else "") + note)
             else:
-                print(f"{br}: merge failed: " + " ".join(part("MSG", "STATE").split()[-30:]) + note)
+                print(f"{br}: merge failed: " + oneline(" ".join(part("MSG", "STATE").split()[-30:]), 600) + note)
             stopped = (br, 1, end)
         elif re.search("^" + re.escape(m) + r"EMPTY 1$", out, re.M):
             print(f"{br}: nothing to merge: already merged into the current branch{note}")
@@ -1278,7 +1298,7 @@ def cmd_integrate(rex, a):
                   + ", merge undone" + note)
             tail = part("VOUT", "VRC")
             if tail:
-                print("  " + tail.replace("\n", "\n  "))
+                print(data(tail, "  "))
             stopped = (br, 1, end)
         else:
             print(f"{br}: merged" + (" (verify ok)" if a.verify else "") + note)
@@ -1370,7 +1390,7 @@ def main():
     dn = sub.add_parser("deny", help="dismiss the open prompt (Escape)"); dn.add_argument("block"); dn.set_defaults(fn=cmd_deny)
     sc = sub.add_parser("screen", help="the last visible lines of a worker's pane")
     sc.add_argument("block"); sc.add_argument("lines", nargs="?", type=int, default=25)
-    sc.set_defaults(fn=lambda rex, a: print(rex.screen(a.block, a.lines)))
+    sc.set_defaults(fn=lambda rex, a: print(clean(rex.screen(a.block, a.lines))))
     st = sub.add_parser("status", help="every reporting pane in the session: state, label, block, open question")
     st.add_argument("--all", action="store_true", help="also panes that report no status"); st.set_defaults(fn=cmd_status)
     cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.set_defaults(fn=cmd_close)
