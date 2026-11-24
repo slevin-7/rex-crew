@@ -120,7 +120,7 @@ routine keys for them, so a question does not stall them; after you answer, run 
 worker is reported for that worker only (exit 4, collect it again later); a result that is not clean is printed as `state: unclean` (its pane stays open).
 A worker must be `idle` on two looks in a row to count as finished. It looks at every worker at least
 once even with `--timeout 0`, can be run again after an `error` (a worker that recovers is picked up again), and exits 6
-for a NAME it has never started. A pane counts as gone only after two failed status calls in a row.
+for a NAME it has never started. A pane counts as gone only after two failed status calls in a row **and** the host no longer lists it (`block ls`); a flaky host that merely fails calls leaves the worker open. A key for a permission prompt is never pressed twice within ten seconds for the same prompt, not even by a second `collect` running at the same time or right after a manual `approve`.
 `skills/rex-crew/SKILL.md` is the full guide, written for the orchestrating agent.
 
 ## Policy

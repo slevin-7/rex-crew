@@ -111,6 +111,15 @@ class Rex:
             return {"state": "gone"}
         return recs[0] if recs and isinstance(recs[0], dict) else {}
 
+    def alive(self, block):
+        """Is the pane still listed on the host? None when the host would not say (a failed call proves nothing)."""
+        p = self.call("block", "ls", "-s", self.session, "--json", check=False)
+        try:
+            blocks = jload(p.stdout)["blocks"] if p.returncode == 0 else None
+            return any(isinstance(b, dict) and b.get("block_id") == block for b in blocks) if isinstance(blocks, list) else None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+
     def screen(self, block, lines=20):
         out = self.call("capture", "-s", self.session, "-b", block, "--trim", check=False).stdout
         return "\n".join([l for l in out.splitlines() if l.strip()][-lines:])
@@ -481,18 +490,40 @@ def trust(rex, run):
     return True
 
 
+def press_claim(run, text):
+    """Take the right to press a key for this prompt, under the ledger lock: another collect running at the same time
+    must see our key (run["press"] = [text, count, time] is stored at once). 'wait', 'stuck' or 'go'."""
+    with ledger_lock():
+        cur = next((x for x in ledger_raw() if isinstance(x, dict) and x.get("id") == run["id"]), None)
+        press, theirs = run.get("press"), cur.get("press") if cur else None
+        if isinstance(theirs, list) and len(theirs) == 3 and (not press or theirs[2] > press[2]):
+            press = theirs
+        last, n, at = press or ["", 0, 0]
+        n, at = (n, at) if last == text else (0, 0)
+        if n and time.time() - at < 10:
+            run["press"] = press
+            return "wait"
+        if n >= 3:
+            return "stuck"
+        run["press"] = [text, n + 1, time.time()]
+        if cur:
+            ledger_update({**cur, "press": run["press"]}, locked=True)
+        return "go"
+
+
 def tick(rex, run, policy):
     """Look at one worker once. Returns None while it works, or a result dict when it stops."""
     approve, never = policy
     rec = rex.status(run["block"])
     state, age = rec.get("state", "none"), time.time() - run["t0"]
-    if state != "blocked":
+    if state not in ("blocked", "gone"):  # one failed status call must not make us forget that we just pressed
         run.pop("press", None)
     if state not in ("idle", "done"):
         run.pop("idle", None)
     if state == "gone":  # one failed status call is not a vanished pane: ask again on the next pass
         run["gone"] = run.get("gone", 0) + 1
-        return {"state": "gone"} if run["gone"] >= 2 else None
+        # A failed or garbled answer reads as "gone" as well; only a pane the host no longer lists is gone.
+        return {"state": "gone"} if run["gone"] >= 2 and rex.alive(run["block"]) is False else None
     run.pop("gone", None)
     if state == "working":
         run["seen"] = True
@@ -515,16 +546,18 @@ def tick(rex, run, policy):
             # Give the orchestrator the screen, so it can decide without a second call.
             return {"state": "blocked", "kind": kind, "question": f"{text}\nthe worker's screen:\n{rex.screen(run['block'], 20)}"}
         if kind == "permission" and routine(text, approve, never):
-            last, n, at = run.get("press") or ["", 0, 0]
-            n, at = (n, at) if last == text else (0, 0)
-            if n and time.time() - at < 10:
-                return None  # the same prompt is still up right after our key: wait, do not type a second 1
-            if n >= 3:
+            old = run.get("press")
+            verdict = press_claim(run, text)
+            if verdict == "wait":
+                return None  # the same prompt is still up right after a key (ours or another collect's): do not type a second 1
+            if verdict == "stuck":
                 return {"state": "blocked", "kind": kind, "prompt": text, "question": text + "  (approved 3 times, the prompt stays)"}
             if approve_once(rex, run["block"], text):
-                run["press"] = [text, n + 1, time.time()]
                 run.setdefault("approved", []).append(text)
                 return None
+            run["press"] = old  # the prompt had changed: nothing was pressed
+            if old is None:
+                run.pop("press")
         return {"state": "blocked", "kind": kind, "prompt": text, "question": text}
     elif state == "none" and age > 15 and not run.get("seen"):
         # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
@@ -553,7 +586,8 @@ def start(rex, a, agent_args):
     same = lambda r: r["dir"].rstrip("/") == a.dir.rstrip("/") or r.get("real", r["dir"]).rstrip("/") == real.rstrip("/")
     for r in [r for r in mine(rex) if same(r)]:
         # its pane is closed: it cannot hold the directory. One failed status call is not proof (tick asks twice too).
-        if rex.status(r["block"]).get("state") == "gone" and rex.status(r["block"]).get("state") == "gone":
+        # A failed or garbled answer reads as "gone" too: the host must also stop listing the pane.
+        if rex.status(r["block"]).get("state") == "gone" and rex.status(r["block"]).get("state") == "gone" and rex.alive(r["block"]) is False:
             r["state"] = "gone"
             ledger_update(r)
     # Check and claim under one lock: two starts at the same moment must not both pass. A claim that never
@@ -593,11 +627,15 @@ def launch(rex, a, agent_args, task, claim):
     line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd -- " + d
             + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
     try:
+        rex_out = ""
         p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
+        rex_out = p.stdout
         block = jload(p.stdout)["block_ids"][0]
-    except (SystemExit, ValueError, KeyError, IndexError, TypeError, AttributeError):
+    except (SystemExit, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
         close_strays(rex, a.name)  # the pane may exist although the answer never came: do not leave it running unrecorded
-        raise
+        if isinstance(e, SystemExit):
+            raise
+        die(f"rex run did not say which pane it started: {str(rex_out)[:200]!r}", 4)
     run = {**claim, "block": block, "verify": a.verify, "verify_timeout": a.verify_timeout,
            "trust": a.trust, "keep": a.keep, "state": "open", "t0": time.time()}
     try:
@@ -612,10 +650,24 @@ def close_strays(rex, name):
     """After a start that failed half way: close panes labelled NAME that no ledger entry knows."""
     try:
         known = {r["block"] for r in ledger_load()}
-        for b in jload(rex.call("block", "ls", "-s", rex.session, "--json").stdout).get("blocks", []):
+        for attempt in range(3):  # the same flaky host that lost the answer may lose this one too: ask again
+            try:
+                p = rex.call("block", "ls", "-s", rex.session, "--json", check=False)
+                blocks = jload(p.stdout).get("blocks", []) if p.returncode == 0 else None
+                if blocks is not None:
+                    break
+            except (ValueError, AttributeError):
+                pass
+        else:
+            raise ValueError("block ls gave no list")
+        for b in blocks:
             if b.get("label") == name and b.get("block_id") not in known:
-                rex.call("block", "close", "-s", rex.session, b["block_id"], check=False)
-                print(f"rex-crew: closed the half-started pane {b['block_id']} ({name})", file=sys.stderr)
+                for _ in range(3):  # a failed close is not a closed pane: say what is true
+                    if rex.call("block", "close", "-s", rex.session, b["block_id"], check=False).returncode == 0:
+                        print(f"rex-crew: closed the half-started pane {b['block_id']} ({name})", file=sys.stderr)
+                        break
+                else:
+                    print(f"rex-crew: could not close the half-started pane {b['block_id']} ({name}): run rex-crew close {b['block_id']}", file=sys.stderr)
     except (SystemExit, ValueError, KeyError, TypeError, AttributeError):
         print(f"rex-crew: could not check for a half-started pane named {name}; see 'rex-crew status'", file=sys.stderr)
 
@@ -936,6 +988,11 @@ def cmd_approve(rex, a):
         die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", 7)
     if not approve_once(rex, a.block, text):
         die("no permission prompt open, or not a Claude Code pane. See `rex-crew status` for what the pane is doing", 6)
+    for r in mine(rex, LIVE + ("unclean",)):
+        if r["block"] == a.block:  # a collect right after must not press for this same prompt again
+            last, n, at = r.get("press") or ["", 0, 0]
+            r["press"] = [text, n + 1 if last == text else 1, time.time()]
+            ledger_update(r)
     print(f"approved once: {text[:200]}")
 
 
@@ -970,13 +1027,16 @@ def cmd_deny(rex, a):
 
 
 def cmd_status(rex, a):
-    blocks = jload(rex.call("block", "ls", "-s", rex.session, "--json").stdout)["blocks"]
+    try:
+        blocks = jload(rex.call("block", "ls", "-s", rex.session, "--json").stdout)["blocks"]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        die("rex block ls did not answer with a list of panes (see the host)", 4)
     for b in blocks:
         rec = rex.status(b["block_id"])
         if not rec and not a.all:
             continue
         kind, text = question(rec)
-        print("\t".join([rec.get("state", "-"), b.get("label", "-"), b["block_id"], (kind + " " + text).strip()[:100]]))
+        print("\t".join([str(rec.get("state", "-")), str(b.get("label", "-")), str(b["block_id"]), (kind + " " + text).strip()[:100]]))
 
 
 def cmd_close(rex, a):
