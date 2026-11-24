@@ -322,6 +322,18 @@ def question(rec):
     return kind, m.group(1) if m else msg
 
 
+class Patterns(list):
+    """The approve patterns, plus the env variable NAMES the policy allows as a command prefix (`.env`, default none)."""
+    env = ()
+
+
+# Never allowed as a prefix, whatever the policy lists: they change what the command loads, runs or where it looks.
+ENV_FORBIDDEN = re.compile(r"(?i)(?:LD_|DYLD_|GIT_|PYTHON|BASH|NODE_|NPM_|PERL|RUBY|XDG_|SSH_|JAVA|_JAVA|CARGO_|RUST|GO(?:FLAGS|PATH|ROOT|PROXY|ENV|TOOLCHAIN|CACHE))"
+                           r"|(?:PATH|HOME|SHELL|IFS|ENV|CDPATH|PS[1-4]|PROMPT_COMMAND|TMPDIR|EDITOR|VISUAL|PAGER|MANPAGER|BROWSER|CC|CXX|CPP|LD|AR|"
+                           r"MAKEFLAGS|MAKE|MFLAGS|MAKEFILES|SHELLOPTS|POSIXLY_CORRECT|TERMINFO|TERMCAP|CLASSPATH|LOCPATH|NLSPATH|HOSTALIASES|"
+                           r"USER|LOGNAME|PWD|OLDPWD|_)\Z")
+
+
 def load_policy(path):
     """The policy's two pattern lists. Anything off is a clear exit 2, never a half-read policy."""
     if not path:
@@ -330,8 +342,14 @@ def load_policy(path):
     try:
         with open(os.path.expanduser(path), encoding="utf-8") as f:
             p = json.load(f)  # ValueError covers bad JSON and bad UTF-8
-        if not isinstance(p, dict) or set(p) - {"approve", "never"}:
-            raise ValueError("only the keys approve and never are allowed")
+        if not isinstance(p, dict) or set(p) - {"approve", "never", "env"}:
+            raise ValueError("only the keys approve, never and env are allowed")
+        names = p.get("env", [])
+        if not isinstance(names, list) or not all(isinstance(x, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", x) for x in names):
+            raise ValueError('"env" must be a list of plain variable NAMES (like "CI"), not assignments')
+        for x in names:
+            if ENV_FORBIDDEN.match(x):
+                raise ValueError(f'"env" may not list {x}: it changes what a command loads or runs (LD_*, DYLD_*, GIT_*, PATH, PYTHON*, ...)')
         lists = []
         for key in ("approve", "never"):
             pats = p.get(key, [])
@@ -343,7 +361,9 @@ def load_policy(path):
                 except re.error as e:
                     raise ValueError(f'invalid {key} pattern {x!r}: {e}')
             lists.append([re.compile(x) for x in pats])
-        return lists[0], lists[1]
+        approve = Patterns(lists[0])
+        approve.env = tuple(names)
+        return approve, lists[1]
     except (OSError, ValueError, RecursionError) as e:  # RecursionError: a file nested thousands deep, in JSON or in a pattern
         if isinstance(e, RecursionError):
             e = "nested too deeply"
@@ -353,7 +373,7 @@ def load_policy(path):
 def opaque(body):
     """True if the shell could turn this Bash text into a path no pattern has seen: $VAR, ${...}, brace lists, or a
     glob in a hidden (.x*) or directory segment (/e?c/, ~/.s?h/). Quoted text and a glob in the last segment are fine."""
-    word, quote, i, n = [], None, 0, len(body)  # word: (char, is_glob) pairs
+    word, quote, has, i, n = [], None, False, 0, len(body)  # word: (char, is_glob) pairs; has: a quote or escape began it
     def hit():
         segs, cur = [], []
         for ch, g in word:
@@ -377,30 +397,36 @@ def opaque(body):
         elif c == "\\" and i + 1 < n:
             i += 1
             word.append((body[i], False))
-        elif c == "$" and body[i + 1:i + 2] and (body[i + 1].isalnum() or body[i + 1] in "_{@*#?!$-"):
-            return True
+            has = True
+        elif c == "$" and body[i + 1:i + 2] and (body[i + 1].isalnum() or body[i + 1] in "_{@*#?!$-["):
+            return True  # any other $ (before a space, a quote, a pipe, ., /, the end) stays a literal $ in sh
         elif quote == '"':
             if c == '"':
                 quote = None
             else:
                 word.append((c, False))
         elif c in "'\"":
-            quote = c
+            quote, has = c, True
         elif c.isspace() or c in ";&|<>":
             if hit():
                 return True
-            word = []
+            word, has = [], False
+        elif c == "#" and not word and not has:
+            while i < n and body[i] != "\n":  # a comment: what it holds, quotes included, is never read by sh
+                i += 1
+            continue
         else:
             word.append((c, c in "*?["))
         i += 1
     return hit()
 
 
-def parts(text):
+def parts(text, raw=False):
     """`Bash: a; b | c` -> ['Bash: a', 'Bash: b', 'Bash: c'], splitting only outside quotes.
     One pass in the order a POSIX shell reads: quotes and escapes first, then comments, then operators. An operator
     counts only outside quotes and when not backslash-escaped. Whatever cannot be read with certainty (a write, a
-    substitution, $'..', an unfinished quote) gives ['Bash: <redirection>'], which no pattern approves."""
+    substitution, $'..', an unfinished quote) gives ['Bash: <redirection>'], which no pattern approves.
+    raw=True gives each command as its list of words (quotes removed) instead; a refusal is still that one string."""
     tool, sep, body = text.partition(": ")
     if tool != "Bash" or not sep:
         return [text]
@@ -475,7 +501,49 @@ def parts(text):
     end_word()
     if cur:
         out.append(cur)
-    return [f"Bash: {' '.join(c)}" for c in out]
+    return out if raw else [f"Bash: {' '.join(c)}" for c in out]
+
+
+def wrapper_len(w):
+    """How many leading words are only a wrapper (time, time -p, timeout [-k D] [-s SIG] DURATION) around the command
+    that follows. 0 for anything else, even a near miss: the option lists stay closed (`time -o FILE` writes)."""
+    if w[:1] == ["time"]:
+        return 2 if w[1:2] == ["-p"] else 1
+    if w[:1] == ["timeout"]:
+        dur, sig, j = r"\d+(\.\d+)?[smhd]?", r"[A-Za-z][A-Za-z0-9]*|\d+", 1
+        while j < len(w):
+            if w[j] in ("--preserve-status", "--foreground", "-v") or re.fullmatch(f"--kill-after={dur}|--signal=({sig})", w[j]):
+                j += 1
+            elif w[j] in ("-k", "-s") and j + 1 < len(w) and re.fullmatch(dur if w[j] == "-k" else sig, w[j + 1]):
+                j += 2
+            else:
+                break
+        if j < len(w) and re.fullmatch(dur, w[j]):
+            return j + 1
+    return 0
+
+
+def unwrap(w, env):
+    """The command a word list really runs: leading NAME=value words dropped when the policy lists NAME (and the value
+    is plain), then time/timeout wrappers. Unchanged when it cannot be sure; an assignment alone is not a command."""
+    assign = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([A-Za-z0-9_.,:/+@%-]*)\Z")
+    i = 0
+    while i < len(w) and (m := assign.match(w[i])) and m.group(1) in env and not ENV_FORBIDDEN.match(m.group(1)):
+        i += 1
+    rest = w[i:]
+    if i and (not rest or re.match(r"[A-Za-z_][A-Za-z0-9_]*=", rest[0])):
+        return w
+    while rest and 0 < wrapper_len(rest) < len(rest):
+        rest = rest[wrapper_len(rest):]
+    return rest
+
+
+def judged(text, env=()):
+    """The commands a prompt really asks for, as 'Bash: cmd args': parts() with env prefixes and wrappers taken off."""
+    ps = parts(text, raw=True)
+    if text.partition(": ")[0] != "Bash" or not ps or isinstance(ps[0], str):
+        return ps if ps and isinstance(ps[0], str) else [text]
+    return [f"Bash: {' '.join(unwrap(c, env))}" for c in ps]
 
 
 def routine(text, approve, never):
@@ -483,15 +551,17 @@ def routine(text, approve, never):
     if not text or any(r.search(text) for r in never):
         return False
     ps = parts(text)
+    env = getattr(approve, "env", ())
+    js = judged(text, env)  # what runs once the env prefixes and wrappers the policy allows are off
     # `never` also sees the command as the shell will read it: `~/.s''sh` is `~/.ssh`.
     # Command substitution runs something no pattern has seen, so it is never routine.
     # (For Bash, parts() has looked for them outside single quotes and escapes.)
     tool, _, body = text.partition(": ")
-    if (tool != "Bash" and ("`" in text or "$(" in text)) or any(r.search(p) for r in never for p in ps):
+    if (tool != "Bash" and ("`" in text or "$(" in text)) or any(r.search(p) for r in never for p in ps + js):
         return False
     if tool == "Bash":
         # `cd /etc` then a relative `cat hosts`: the directory itself must pass `never` as a directory.
-        if opaque(body) or any(r.search(p + "/") for r in never for p in ps if re.match(r"Bash: (cd|pushd)(\s|$)", p)):
+        if opaque(body) or any(r.search(p + "/") for r in never for p in js if re.match(r"Bash: (cd|pushd)(\s|$)", p)):
             return False
     else:
         # A path prefix pattern must not be walked out of: `..` components, or a second line, are never routine.
@@ -500,7 +570,7 @@ def routine(text, approve, never):
         if body.startswith("/") and any(r.search(f"{tool}: {posixpath.normpath(body)}") for r in never):
             return False
     # Anchored at the start: an unanchored pattern must not approve a command that merely mentions it later.
-    return "Bash: <redirection>" not in ps and all(any(r.match(p) for r in approve) for p in ps)
+    return "Bash: <redirection>" not in ps and all(any(r.match(p) for r in approve) for p in js)
 
 
 def approve_once(rex, block, expect):
