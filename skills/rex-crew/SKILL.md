@@ -45,7 +45,7 @@ NEXT: surface the retry count in the logs
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
 | 3 | `timeout` | Still working after `--timeout` seconds (default 900). `collect` waits again. |
 | 4 | `error` | The worker reported an error; `screen BLOCK` shows it. It may recover: `collect` again picks it up. |
-| 5 | `gone` | The pane is closed (two failed status calls in a row). |
+| 5 | `gone` | The pane is closed (two failed status calls in a row, and the host no longer lists the pane; a flaky host alone is not `gone`). |
 | 6 | (no state) | `collect NAME` for a name that was never started: check `runs`. |
 
 A `--policy` file that is missing or malformed (not JSON, `approve`/`never` not lists of non-empty regexes, any other key) exits 2 before anything starts. Other commands: `send`, `answer`, `deny` and `approve` exit 6 when there is nothing to act on, `approve --match` exits 7 when the open prompt differs, `sh` exits with the command's own status.
