@@ -243,6 +243,10 @@ A=$("$here/rex-crew" checkout api /abs/repo)
 "$here/rex-crew" run review "$A" review.md --agent claude --policy policy.json --brief   # review.md: read the last commit, change nothing, report findings
 ```
 
+A Codex permission dialog (`Would you like to run the following command?`) comes back as `needs you (permission)` with the screen. The tool never decides it;
+after reading the screen you may pick one of its options with `answer BLOCK N` (it presses that digit and nothing else). With Codex's default sandbox this
+happens for every `git add`, `git commit` and command outside DIR, so give Codex its own approval flags after `--` when the user has decided that.
+
 ## What tends to go wrong
 
 - Plugins and hooks of the host's Claude Code apply to workers. Turn one off with

@@ -1407,6 +1407,14 @@ def cmd_answer(rex, a):
     rec = rex.status(a.block)
     if not rec and answer_startup(rex, a):
         return
+    if rec.get("state") == "blocked" and rec.get("kind") != "question" and rec.get("app", "claude-code") != "claude-code":
+        # Another agent's dialog: the tool never decides it, but a person who read the screen may pick an option
+        # the screen really offers. The digit and nothing else.
+        if a.text or not re.fullmatch(r"[1-9]", a.choice) or not re.search(rf"(?m)^\W*{a.choice}\. \S", rex.screen(a.block, 40)):
+            die("this dialog takes one of the option numbers on its screen (`rex-crew screen BLOCK` shows them)", USAGE)
+        rex.type(a.block, a.choice)
+        update_runs(rex, a.block, LIVE, state="open", t0=time.time(), wait_since=None, wait=None)
+        return
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
         die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", USAGE)
     if re.fullmatch(r"[0-9]+", a.choice) and not a.text:

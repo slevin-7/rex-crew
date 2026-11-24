@@ -416,6 +416,21 @@ class Turn(Codex):
         self.assertNotIn(" approve b", out)  # and no copy-paste line that would press for it
         self.assertIn("screen b", out)
 
+    def test_a_person_may_pick_an_option_of_a_codex_permission_dialog_with_answer(self):
+        # Seen on a real host: Codex asks "Would you like to run the following command?" for git add, git commit, ...
+        prompt = cx("blocked", "permission", "")
+        self.start("w1", [prompt] * 6)
+        self.set_output("w1", "Would you like to run the following command?\n  $ git add -- x.txt\n› 1. Yes, proceed (y)\n  2. Yes, and don't ask again (p)\n  3. No (esc)\n")
+        b = self.block_of("w1")
+        code, out, err = self.cli("answer", b, "7")  # not on the screen
+        self.assertNotEqual(code, 0, out + err)
+        code, out, err = self.cli("answer", b, "yes", "--text")  # free text is not an option number
+        self.assertNotEqual(code, 0, out + err)
+        self.assertEqual(self.keys(), [])
+        code, out, err = self.cli("answer", b, "1")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.keys(), [("text", "1")])  # the digit and nothing else
+
     def test_the_record_decides_too_a_claude_started_pane_that_reports_codex(self):
         d = self.workdir("w1")
         prompt = cx("blocked", "permission", "approve Bash: git status --short")
