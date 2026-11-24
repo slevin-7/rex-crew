@@ -112,7 +112,7 @@ class TestCheckoutCleanup(TestCheckout):
     def test_failed_copy_leaves_nothing_and_retry_works(self):
         repo = self.repo()
         code, out, err = self.cli("checkout", "w1", repo, "--copy", "does-not-exist")
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertIn("removed", err)
         self.assertEqual(self.branches(repo), "")
         self.assertFalse(os.path.exists(f"{self.tmp.name}/.rex-crew-worktrees/repo/w1"))
@@ -124,7 +124,7 @@ class TestCheckoutCleanup(TestCheckout):
         repo = self.repo()
         self.assertEqual(self.cli("checkout", "w1", repo)[0], 0)
         code, _, err = self.cli("checkout", "w1", repo)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("already exists", err)
         self.assertNotIn("fatal", err)
 
@@ -132,7 +132,7 @@ class TestCheckoutCleanup(TestCheckout):
         repo = self.repo()
         subprocess.run(["git", "-C", repo, "branch", "crew/w1"], check=True, env={**os.environ, **GIT_ENV})
         code, _, err = self.cli("checkout", "w1", repo)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 6)
         self.assertIn("--branch", err)
 
 
@@ -146,20 +146,20 @@ class TestStartRace(HostBase):
         codes = sorted(p.wait(30) for p in procs)
         for p in procs:
             p.stdout.close(); p.stderr.close()
-        self.assertEqual(codes, [0, 2])
+        self.assertEqual(codes, [0, 6])
         self.assertEqual(len([r for r in self.ledger_runs() if r["state"] == "open"]), 1)
 
     def test_failed_start_does_not_block_the_directory(self):
         d = self.workdir()
         code, _, _ = self.cli("start", "a", d, "/nonexistent/task.md")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.script("b", rec("working"))
         self.assertEqual(self.cli("start", "b", d, self.task)[0], 0)
 
     def test_half_started_claim_is_released_when_the_upload_fails(self):
         gone = f"{self.tmp.name}/missing"
         code, _, _ = self.cli("start", "a", gone, self.task)
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertEqual([r for r in self.ledger_runs() if r["state"] in ("starting", "open")], [])
 
 
@@ -172,7 +172,7 @@ class TestSymlinkDir(HostBase):
         self.script("b", rec("working"))
         self.assertEqual(self.cli("start", "a", link, self.task)[0], 0)
         code, _, err = self.cli("start", "b", real, self.task)
-        self.assertEqual(code, 2, err)
+        self.assertEqual(code, 6, err)
         self.assertIn("already has a live worker", err)
 
     def test_real_path_then_symlink(self):
@@ -181,7 +181,7 @@ class TestSymlinkDir(HostBase):
         os.symlink(real, link)
         self.script("a", rec("working"))
         self.assertEqual(self.cli("start", "a", real, self.task)[0], 0)
-        self.assertEqual(self.cli("start", "b", link, self.task)[0], 2)
+        self.assertEqual(self.cli("start", "b", link, self.task)[0], 6)
 
     def test_symlink_dir_works_for_the_report(self):
         real = self.workdir("real")
@@ -197,7 +197,7 @@ class TestSymlinkDir(HostBase):
 class TestShFaithful(HostBase):
     def test_quotes_newlines_and_exit_status(self):
         code, out, _ = self.cli("sh", "printf '%s\\n' \"it's\" 'two $x'; printf 'a\\n\\nb\\n'; exit 5")
-        self.assertEqual(code, 5)
+        self.assertEqual(code, 1)
         self.assertEqual(out.splitlines(), ["it's", "two $x", "a", "", "b"])
 
     def test_cut_output_is_announced(self):

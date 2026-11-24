@@ -181,7 +181,7 @@ class TestPolicyFileErrors(Base):
         d = self.workdir()
         self.script("w1", rec("working"))
         code, out, err = self.cli("run", "w1", d, self.task, "--policy", "/nonexistent/policy.json")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertIn("policy", err)
         self.assertEqual(self.fake()["blocks"], {})
         self.assertFalse(os.path.exists(self.ledger))
@@ -190,14 +190,14 @@ class TestPolicyFileErrors(Base):
         self.script("w1", rec("working"))
         self.cli("start", "w1", self.workdir(), self.task)
         code, out, err = self.cli("collect", "--policy", "/nonexistent/policy.json")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertIn("policy", err)
 
     def test_broken_policies_are_refused_with_what_to_fix(self):
         for text in ("not json", "[]", '{"approve": "^Bash: git status"}', '{"approve": ["("]}',
                      '{"aprove": ["^Bash: ls"]}', '{"approve": [""]}', '{"never": [1]}'):
             code, out, err = self.cli("collect", "--policy", self.write(text))
-            self.assertEqual(code, 2, f"{text}: {out}{err}")
+            self.assertEqual(code, 6, f"{text}: {out}{err}")
             self.assertIn("policy", err, text)
             self.assertIn("approve", err, f"{text}: the message does not say what a policy looks like")
 

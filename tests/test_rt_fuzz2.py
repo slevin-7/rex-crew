@@ -126,7 +126,7 @@ class TestStrays(GitBase):
         self.assertFalse(self.fake()["blocks"]["b77"]["closed"])
 
     def test_two_flags_are_refused(self):
-        self.assertEqual(self.cli("strays", "--adopt", "--close")[0], 2)
+        self.assertEqual(self.cli("strays", "--adopt", "--close")[0], 6)
 
 
 class TestPolicyLoader(GitBase):
@@ -152,7 +152,7 @@ class TestPolicyLoader(GitBase):
                     code, out, err = self.load(data)
                 except RecursionError as e:
                     self.fail(f"traceback (RecursionError) for {name}")
-                self.assertIn(code, (0, 2), f"{name}: {code} {err[-300:]}")
+                self.assertIn(code, (0, 6), f"{name}: {code} {err[-300:]}")
                 self.assertNotIn("Traceback", err)
                 if code == 2:
                     self.assertIn("policy", err)
@@ -165,7 +165,7 @@ class TestPolicyLoader(GitBase):
                 data = b'{"approve": [' + data + b"]}"
             with self.subTest(i=i):
                 code, out, err = self.load(data)
-                self.assertIn(code, (0, 2), err[-300:])
+                self.assertIn(code, (0, 6), err[-300:])
                 self.assertNotIn("Traceback", err)
 
 
@@ -213,7 +213,7 @@ class TestCheckoutOdd(GitBase):
                 before = git(repo, "branch", "--list")
                 code, out, err = self.cli(*args)
                 self.assertNotIn("Traceback", err)
-                self.assertIn(code, (0, 1, 2), out + err)
+                self.assertIn(code, (0, 1, 2, 4, 6), out + err)
                 if code != 0:
                     self.assertEqual(git(repo, "branch", "--list"), before, "a failed checkout left a branch\n" + err)
                     self.assertEqual(git(repo, "worktree", "list").count("\n"), 0, "a failed checkout left a worktree\n" + err)

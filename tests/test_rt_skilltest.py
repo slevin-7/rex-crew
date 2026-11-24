@@ -23,21 +23,21 @@ class Probe(GitBase):
 class TestPlanTypes(Probe):
     def test_trust_must_be_a_boolean(self):
         (code, out, err), _ = self.probe(trust="false")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
 
     def test_copy_must_be_a_list(self):
         (code, out, err), repo = self.probe(copy="base.txt")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
 
     def test_claude_args_must_be_a_list_of_strings(self):
         (code, out, err), _ = self.probe(claude_args="--permission-mode")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
 
     def test_verify_timeout_must_be_a_positive_number(self):
         (code, out, err), _ = self.probe(verify="true", verify_timeout="soon")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         (code, out, err), _ = self.probe(verify="true", verify_timeout=-5)
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
 
 
 class TestExitCodes(Probe):

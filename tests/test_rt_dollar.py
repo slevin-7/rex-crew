@@ -101,7 +101,7 @@ class TestEnv(Mixin, Base):
                 json.dump({"approve": ["^Bash: x"], "env": bad}, f)
             with self.assertRaises(SystemExit) as cm, contextlib.redirect_stderr(io.StringIO()):
                 self.mod.load_policy(p)
-            self.assertEqual(cm.exception.code, 2, bad)
+            self.assertEqual(cm.exception.code, 6, bad)  # usage: one exit table
 
     def test_never_still_sees_the_whole_command(self):
         self.assertFalse(self.routine("Bash: FOO=1 python3 evil.py", env=["FOO"], never=[r"evil"]))

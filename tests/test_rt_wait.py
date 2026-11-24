@@ -174,7 +174,7 @@ class Wait(Base):
     def test_waiting_after_must_be_positive_number(self):
         self.start("w1", rec("working"))
         code, out, err = self.cli("collect", "--timeout", "0", "--waiting-after", "-1")
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)  # usage: one exit table
 
 
 if __name__ == "__main__":

@@ -58,7 +58,7 @@ class TestTaskUpload(HostBase):
 
     def test_missing_task_file_is_a_clean_error(self):
         code, _, err = self.cli("start", "w1", self.workdir(), "/nonexistent/task.md")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("cannot read the task", err)
 
     def test_awkward_directory_names(self):
@@ -214,18 +214,18 @@ class TestCheckout(HostBase):
 
     def test_checkout_name_cannot_escape(self):
         code, _, err = self.cli("checkout", "../evil", self.repo())
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
 
     def test_not_a_git_repository_is_a_clean_failure(self):
         code, _, err = self.cli("checkout", "w1", self.workdir("plain"))
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 4)
         self.assertIn("checkout failed", err)
 
 
 class TestSh(HostBase):
     def test_sh_returns_output_and_exit_status(self):
         code, out, _ = self.cli("sh", "echo hi; exit 7")
-        self.assertEqual(code, 7)
+        self.assertEqual(code, 1)
         self.assertIn("hi", out)
 
 

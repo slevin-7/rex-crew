@@ -141,7 +141,7 @@ class Brief(Base):
         argv = shlex.split(line)
         self.reprogram("w1", rec("blocked", "permission", "permission approve Bash: git stash list; rm -rf /"))
         code, _, err = self.cli(*argv)
-        self.assertEqual(code, 7, "the line approved a different prompt than the one shown")
+        self.assertEqual(code, 2, "the line approved a different prompt than the one shown")
         self.reprogram("w1", rec("blocked", "permission", "permission approve Bash: git stash list"))
         self.assertEqual(self.cli(*argv)[0], 0)
 
@@ -220,7 +220,7 @@ class Preamble(Base):
         d = self.workdir("w1")
         for p in (f"{self.tmp.name}/nope.md", self.pre("  \n")):
             code, out, err = self.cli("start", "w1", d, self.task, "--preamble", p)
-            self.assertEqual(code, 2, err)
+            self.assertEqual(code, 6, err)
             self.assertFalse([b for b in self.fake()["blocks"].values() if b["label"] == "w1"])
         self.assertFalse(os.path.exists(self.ledger) and [r for r in self.ledger_runs() if r["state"] != "gone"])
 
@@ -268,7 +268,7 @@ class Preamble(Base):
     def test_plan_key_preamble_is_relative_to_the_plan_and_checked_before_anything_is_made(self):
         path, repo = self.plan(preamble="missing.md")
         code, out, err = self.cli("fanout", path)
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertFalse(self.fake()["blocks"] and [b for b in self.fake()["blocks"].values() if b["label"] in ("a", "b")])
         self.assertFalse(os.path.exists(f"{self.tmp.name}/.rex-crew-worktrees"))
         with open(f"{self.tmp.name}/pre.md", "w") as f:
@@ -284,7 +284,7 @@ class Preamble(Base):
     def test_a_bad_preamble_option_stops_fanout_before_any_checkout(self):
         path, repo = self.plan()
         code, out, err = self.cli("fanout", path, "--preamble", f"{self.tmp.name}/nope.md")
-        self.assertEqual(code, 2, err)
+        self.assertEqual(code, 6, err)
         self.assertFalse(os.path.exists(f"{self.tmp.name}/.rex-crew-worktrees"))
 
 

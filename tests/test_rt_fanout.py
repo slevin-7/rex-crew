@@ -193,13 +193,13 @@ class TestIntegrate(GitBase):
         repo = self.repo()
         for bad in ("--abort", "../x", "A b", "a;rm", "-x", ""):
             code, _, err = self.cli("integrate", repo, bad)
-            self.assertEqual(code, 2, bad)
+            self.assertEqual(code, 6, bad)
 
     def test_same_name_twice_is_refused(self):
         repo = self.repo()
         self.branch(repo, "a", {"a.txt": "a\n"})
         code, _, err = self.cli("integrate", repo, "a", "a")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("twice", err)
 
     def test_the_current_branch_cannot_be_merged_into_itself(self):
@@ -275,7 +275,7 @@ class TestIntegrateHostile(GitBase):
         repo = self.repo()
         self.branch(repo, "a", {"a.txt": "a\n"})
         code, _, err = self.cli("integrate", repo, "a", "--verify", "")
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("verify", err)
         self.assertFalse(os.path.exists(f"{repo}/a.txt"))
 
@@ -284,7 +284,7 @@ class TestIntegrateHostile(GitBase):
         self.branch(repo, "a", {"a.txt": "a\n"})
         for bad in ("0", "-3"):
             code, _, err = self.cli("integrate", repo, "a", "--verify", "true", "--verify-timeout", bad)
-            self.assertEqual(code, 2, bad)
+            self.assertEqual(code, 6, bad)
             self.assertIn("verify-timeout", err)
         self.assertFalse(os.path.exists(f"{repo}/a.txt"))
 
@@ -384,7 +384,7 @@ class TestFanout(GitBase):
     def bad(self, expect, **kw):
         path, p = self.plan(**kw)
         code, out, err = self.cli("fanout", path)
-        self.assertEqual(code, 2, f"{kw}: {out}{err}")
+        self.assertEqual(code, 6, f"{kw}: {out}{err}")
         self.assertIn(expect, err, kw)
         self.nothing_left(p["repo"])
 
@@ -417,14 +417,14 @@ class TestFanout(GitBase):
             path = f"{self.tmp.name}/bad.json"
             open(path, "w").write(text)
             code, _, err = self.cli("fanout", path)
-            self.assertEqual(code, 2, text)
+            self.assertEqual(code, 6, text)
             self.assertIn(expect, err)
-        self.assertEqual(self.cli("fanout", "/nonexistent/plan.json")[0], 2)
+        self.assertEqual(self.cli("fanout", "/nonexistent/plan.json")[0], 6)
 
     def test_repo_that_is_not_a_git_repository(self):
         path, _ = self.plan(repo_path=self.workdir("plain"), base="HEAD")
         code, _, err = self.cli("fanout", path)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertFalse(os.path.exists(f"{self.tmp.name}/.rex-crew-worktrees"))
 
     def test_existing_branch_or_checkout_refuses_the_whole_plan(self):
@@ -432,7 +432,7 @@ class TestFanout(GitBase):
         git(repo, "branch", "crew/b")
         path, _ = self.plan(repo_path=repo)
         code, _, err = self.cli("fanout", path)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("crew/b", err)
         self.assertEqual(git(repo, "branch", "--list", "crew/a"), "", "a was created although b is refused")
         self.assertFalse(os.path.exists(f"{self.tmp.name}/.rex-crew-worktrees"))
@@ -444,7 +444,7 @@ class TestFanout(GitBase):
         self.assertEqual(self.cli("start", "a", d, self.task)[0], 0)
         path, p = self.plan()
         code, _, err = self.cli("fanout", path)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 6)
         self.assertIn("a", err)
         self.assertEqual(self.branches(p["repo"]), "")
 
@@ -459,7 +459,7 @@ class TestFanout(GitBase):
             return real(*a, **k)
         with mock.patch.object(self.mod, "launch", flaky):
             code, out, err = self.cli("fanout", path)
-        self.assertEqual(code, 1, out + err)
+        self.assertEqual(code, 4, out + err)
         self.assertIn("boom", err)
         self.assertIn("rolled back", err)
         self.nothing_left(p["repo"])
@@ -475,7 +475,7 @@ class TestFanout(GitBase):
             return real(*a, **k)
         with mock.patch.object(self.mod, "checkout", flaky):
             code, out, err = self.cli("fanout", path)
-        self.assertEqual(code, 1, out + err)
+        self.assertEqual(code, 4, out + err)
         self.nothing_left(p["repo"])
 
     def test_interrupt_rolls_back_too(self):
@@ -505,7 +505,7 @@ class TestFanout(GitBase):
             return real(*a, **k)
         with mock.patch.object(self.mod, "checkout", racing):
             code, out, err = self.cli("fanout", path)
-        self.assertEqual(code, 2, out + err)
+        self.assertEqual(code, 6, out + err)
         self.assertEqual(open(f"{mine}/precious.txt").read(), "keep me")
         self.assertEqual(self.branches(p["repo"]), "")
 
