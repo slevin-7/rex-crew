@@ -198,4 +198,7 @@ skills/rex-crew/scripts/rex-crew selftest
 python3 -m unittest discover -s tests -v   # needs no Rex: uses tests/fake_rex
 ```
 
+`sh tests/run.sh` runs the same tests with every test file in its own process: about two minutes instead of ten.
+Use it as the verify command for work on this repository.
+
 MIT licensed.
