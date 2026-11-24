@@ -113,7 +113,7 @@ failed verify with a clean tree (exit 1) and refuses up front (exit 2) if REPO h
 
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or
 oversized report, failed or hung verify, uncommitted changes, host output cut; the pane stays open so you can `screen` and `send`), `2` needs you,
-`3` timeout (`--timeout` seconds, default 900), `4` error, `5` pane gone, `6` unknown NAME. A `--policy` file that is missing or malformed exits `2` before any pane opens.
+`3` timeout (`--timeout` seconds, default 900), `4` error, `5` pane gone, `6` unknown NAME. A `--policy` file that is missing or malformed exits `2` before any pane opens, and so does a `--verify-timeout`, `runs --last` or `screen` line count below 1 or an `approve --match` that is not a regular expression. Other commands exit `1` when a host call fails.
 `collect` hands back as soon as any worker needs you and then exits 2, whatever the other workers' codes (a question outranks an error).
 Before it hands back it serves the other workers for up to three more passes (about 12 s) as long as it is still pressing
 routine keys for them, so a question does not stall them; after you answer, run `collect` again at once. A host failure on one
