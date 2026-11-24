@@ -535,6 +535,12 @@ def trust(rex, run):
     return True
 
 
+def prompt_id(text, rec):
+    """What makes two prompts the same one: the text and the time the worker reported it. The same command asked
+    again later is a new prompt, even when no look in between caught the worker working."""
+    return f"{text}\0{rec.get('updated_at', '')}"
+
+
 def press_claim(run, text):
     """Take the right to press a key for this prompt, under the ledger lock: another collect running at the same time
     must see our key (run["press"] = [text, count, time] is stored at once). 'wait', 'stuck' or 'go'."""
@@ -592,7 +598,7 @@ def tick(rex, run, policy):
             return {"state": "blocked", "kind": kind, "question": f"{text}\nthe worker's screen:\n{rex.screen(run['block'], 20)}"}
         if kind == "permission" and routine(text, approve, never):
             old = run.get("press")
-            verdict = press_claim(run, text)
+            verdict = press_claim(run, prompt_id(text, rec))
             if verdict == "wait":
                 return None  # the same prompt is still up right after a key (ours or another collect's): do not type a second 1
             if verdict == "stuck":
@@ -1053,7 +1059,8 @@ def cmd_approve(rex, a):
         wanted = re.compile(a.match or "")
     except re.error as e:
         die(f"--match is not a regular expression: {e}", 2)
-    kind, text = question(rex.status(a.block))
+    rec = rex.status(a.block)
+    kind, text = question(rec)
     if a.match and not wanted.search(text):
         die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", 7)
     if not approve_once(rex, a.block, text):
@@ -1061,7 +1068,7 @@ def cmd_approve(rex, a):
     for r in mine(rex, KEEPS_PANE):
         if r["block"] == a.block:  # a collect right after must not press for this same prompt again
             last, n, at = r.get("press") or ["", 0, 0]
-            r["press"] = [text, n + 1 if last == text else 1, time.time()]
+            r["press"] = [prompt_id(text, rec), n + 1 if last == prompt_id(text, rec) else 1, time.time()]
             ledger_update(r)
     print(f"approved once: {text[:200]}")
 
