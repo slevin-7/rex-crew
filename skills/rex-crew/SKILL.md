@@ -45,7 +45,7 @@ NEXT: surface the retry count in the logs
 | 2 | `blocked` | A question for you, printed as `needs you (...)`. Answer it, then resume. |
 | 3 | `timeout` | Still working after `--timeout` seconds (default 900). `collect` waits again. |
 | 4 | `error` | The worker reported an error; `screen BLOCK` shows it. It may recover: `collect` again picks it up. |
-| 5 | `gone` | The pane is closed (two failed status calls in a row, and the host no longer lists the pane; a flaky host alone is not `gone`). |
+| 5 | `gone` | The pane is closed (two failed status calls in a row, and the host no longer lists the pane; a flaky host alone is not `gone`). What it left in its directory is still shown (`git:`, verify, report): if it committed and wrote a report, `integrate` its branch as usual; if not, start it again. |
 | 6 | (no state) | `collect NAME` for a name that was never started: check `runs`. |
 
 A `--policy` file that is missing or malformed (not JSON, `approve`/`never` not lists of non-empty regexes, any other key) exits 2 before anything starts. Other commands: `send`, `answer`, `deny` and `approve` exit 6 when there is nothing to act on, `approve --match` exits 7 when the open prompt differs, `sh` exits with the command's own status.
@@ -121,8 +121,17 @@ that merge is undone and files the verify left behind are removed); `nothing to 
 the run goes on but exits 1). At the first conflict or failed verify it stops, prints the rest as `not attempted`, leaves the tree clean and exits 1.
 A worker's uncommitted changes are not in its branch: `integrate` warns when a branch's checkout has some. Run `integrate` on the host's REPO only when nobody else is using its working tree. Checkouts and `crew/NAME` branches stay afterwards: `close BLOCK` the panes and remove them with `git worktree remove` / `git branch -d` via `sh`.
 
-`"$here/rex-crew" runs` lists what was started in this session, with state and block. It is kept on disk, so a new
-conversation can pick up open workers: read it first when you resume orchestration.
+`"$here/rex-crew" runs` lists what was started, with state and block. It is kept on disk, so a new conversation can pick up open workers.
+
+### Resuming in a new conversation
+
+You do not know the session, so start with `runs` (it needs none). Columns: `state  name  started  host  dir  block  session  age` ("local" is this machine).
+Then set the address from the row and continue: `export REX_CREW_HOST=HOST REX_CREW_SESSION=SESSION` (or pass `-S HOST -s SESSION` to every command).
+With a session set, `runs` and `collect` show only that session; if it is empty but live workers exist elsewhere they print the `-S/-s` flags to reach them.
+Then: `status` (what each pane shows right now), `collect --policy policy.json` (reports every finished worker once, prints every waiting one with copyable
+`approve`/`answer` lines; answer, then `collect` again), `screen BLOCK` and `send BLOCK "write the report"` for an `unclean` one, then `collect NAME`.
+`gone` is final for the pane: read its `git` and report, then integrate or restart. When everything is `done`/`gone`, `integrate`, remove the checkouts (see above)
+and check that `status` lists nothing and `runs` shows no `open`, `blocked`, `timeout` or `error` worker. `tests/walkthrough_resume.sh` plays this against the fake host.
 
 ## When a worker needs you
 
@@ -182,7 +191,7 @@ exit 1, so never read a worker's summary without the lines above it.
 |---|---|
 | `status [--all]` | Every reporting pane: state, label, block, open question. |
 | `sh COMMAND` | Run one shell command on the host and print its output: git, a build, a look at a file. |
-| `runs [--all]` | The ledger: workers started in this session, their state and block. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>` (newest 5 stay), and `start` fails early if the path is unwritable. A worker whose pane is gone no longer holds its directory. |
+| `runs [--all]` | The ledger: workers started in this session (all sessions when none is set), their state, block, session and age. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>` (newest 5 stay), and `start` fails early if the path is unwritable. A worker whose pane is gone no longer holds its directory. |
 | `screen BLOCK [LINES]` | The visible end of a pane. Agents draw on the alternate screen, so there is no scrollback: long answers belong in the report file. |
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
