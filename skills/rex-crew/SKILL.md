@@ -74,6 +74,7 @@ needs you (permission): Bash: make deploy
 
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
 answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again. A Rex host that does not answer one call within `REX_CREW_TIMEOUT` seconds (default 120) is an error that names the host, not a hang. Text for `send` and `sh` may start with a dash (`send BLOCK -1`). A worker whose first status is `done` is collected after two looks, and two `collect` processes report a worker only once.
+`strays` lists panes of the session that no ledger entry knows, which a `start` killed between opening the pane and writing the ledger leaves behind. Panes that a start of the last 10 minutes claimed by NAME are adopted (`--adopt`: they become open workers, `collect` them as usual) or closed (`--close`); any other pane is only listed, never touched. A `--verify` command prints nothing but its own output.
 An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
 
 `--brief` prints per worker the header, every `ATTENTION:` line, the git and verify lines and only the report's CHANGED and OPEN sections (capped; a missing
@@ -112,9 +113,9 @@ Plan keys: `repo` (required), `base` (default HEAD), `copy`, `claude_args`, `ver
 `name` plus exactly one of `task_file` (relative to the plan file) or `task`. A misspelled key, a bad or repeated NAME, an unreadable or empty task,
 a `copy` path that is absolute, uses `..` or does not exist, an empty `verify`, a base that is not a commit, an existing branch or checkout of that name,
 or a live worker of the same name refuses the whole plan (exit 2) before anything is created. If a later step fails (or you press Ctrl-C), the panes are
-closed and the worktrees and branches that this call made are removed again; ones it did not make are never touched.
+closed and the worktrees and branches that this call made are removed again (also one whose answer was lost); ones it did not make are never touched.
 
-`integrate` runs `--verify` after each merge, on the tree merged so far, not once at the end. It first refuses (exit 2, nothing merged) if the tree of REPO has any change or untracked file, HEAD is detached, a merge or rebase is
+`integrate` runs `--verify` after each merge, on the tree merged so far, not once at the end; the merge is committed only after the verify passed, so a host that dies during the verify leaves a merge in progress (the next call refuses and says so: `git merge --abort`), never an unchecked merge commit. Files the verify leaves in the tree (changed or untracked) are removed and the line says how many. It first refuses (exit 2, nothing merged) if the tree of REPO has any change or untracked file, HEAD is detached, a merge or rebase is
 under way, a branch is missing, listed twice or is the current branch. Then, per branch, in the order given: `merged`; `conflict: FILES` (the merge is
 aborted); `merge failed: MESSAGE` (for example unrelated histories); `verify failed (exit N)` or `verify did not finish within Ns` (`--verify-timeout`, default 600;
 that merge is undone and files the verify left behind are removed); `nothing to merge` (the branch has no commit the current one lacks: it is already merged, or the worker did not commit;

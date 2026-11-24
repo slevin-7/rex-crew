@@ -344,7 +344,9 @@ def load_policy(path):
                     raise ValueError(f'invalid {key} pattern {x!r}: {e}')
             lists.append([re.compile(x) for x in pats])
         return lists[0], lists[1]
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RecursionError) as e:  # RecursionError: a file nested thousands deep, in JSON or in a pattern
+        if isinstance(e, RecursionError):
+            e = "nested too deeply"
         die(f"cannot use the policy {path}: {e}. It must be {shape}. Fix the file, or leave out --policy to have nothing answered for you", 2)
 
 
@@ -645,6 +647,7 @@ def start(rex, a, agent_args):
             die(f"{a.dir} already has a live worker ({busy[0]['name']}): one worker per directory; use `checkout`", 2)
         claim = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "real": real,
                  "host": rex.host or "", "session": rex.session, "block": "", "state": "starting", "t0": time.time(),
+                 "verify": a.verify, "verify_timeout": a.verify_timeout, "trust": a.trust, "keep": a.keep,  # what 'strays --adopt' needs
                  "started": time.strftime("%Y-%m-%d %H:%M")}
         ledger_update(claim, locked=True)
     try:
@@ -681,16 +684,16 @@ def launch(rex, a, agent_args, task, claim):
         p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
         rex_out = p.stdout
         block = jload(p.stdout)["block_ids"][0]
-    except (SystemExit, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
+    except (SystemExit, KeyboardInterrupt, ValueError, KeyError, IndexError, TypeError, AttributeError) as e:
         close_strays(rex, a.name)  # the pane may exist although the answer never came: do not leave it running unrecorded
-        if isinstance(e, SystemExit):
+        if isinstance(e, (SystemExit, KeyboardInterrupt)):
             raise
         die(f"rex run did not say which pane it started: {str(rex_out)[:200]!r}", 4)
     run = {**claim, "block": block, "verify": a.verify, "verify_timeout": a.verify_timeout,
            "trust": a.trust, "keep": a.keep, "state": "open", "t0": time.time()}
     try:
         ledger_update(run)
-    except SystemExit:
+    except BaseException:  # SystemExit, or Ctrl-C before the pane is on record
         rex.close(block)
         raise
     return run
@@ -1113,6 +1116,41 @@ def cmd_close(rex, a):
     update_runs(rex, a.block, KEEPS_PANE, state="closed")
 
 
+def cmd_strays(rex, a):
+    """Panes of this session that no ledger entry has a block for: a start that died between 'rex run' and the ledger
+    write. One whose label is the NAME of a recent claim (state starting) can be adopted or closed; any other is only
+    listed, because it may be a pane the user opened by hand."""
+    blocks = rex.panes()
+    if blocks is None:
+        die("rex block ls did not answer with a list of panes (see the host)", 4)
+    blocks = [b for b in blocks if isinstance(b, dict) and b.get("block_id")]
+    ledger = [r for r in ledger_load() if r["host"] == (rex.host or "") and r["session"] == rex.session]
+    known, shown = {r["block"] for r in ledger_load() if r["block"]}, 0
+    for b in blocks:
+        bid, label = b["block_id"], str(b.get("label") or "")
+        if bid in known or bid == SELF or label == "crew-sh":  # crew-sh: a helper tab of a call that may still be running
+            continue
+        shown += 1
+        claim = next((r for r in reversed(ledger) if r["name"] == label and r["state"] == "starting" and not r["block"]), None)
+        if not claim:
+            print(f"{bid}\t{label or '-'}\tunrecorded, no start claims it: look with 'rex-crew screen {bid}'; 'rex-crew close {bid}' if it is yours")
+        elif a.adopt:
+            claim.update(block=bid, state="open", t0=time.time())
+            ledger_update(claim)
+            print(f"{bid}\t{label}\tadopted: now an open worker in {claim['dir']}; collect it as usual")
+        elif a.close:
+            if rex.close(bid).returncode == 0:
+                claim.update(block=bid, state="closed")
+                ledger_update(claim)
+                print(f"{bid}\t{label}\tclosed")
+            else:
+                print(f"{bid}\t{label}\tcould not be closed: run 'rex-crew close {bid}'")
+        else:
+            print(f"{bid}\t{label}\tstarted by this ledger ({claim['dir']}) but never recorded: --adopt to collect it, --close to stop it")
+    if not shown:
+        print("no stray panes")
+
+
 def cmd_session(rex, a):
     sessions = jload(rex.call("ls", "--json").stdout).get("sessions", [])
     hit = [s["session_id"] for s in sessions if s.get("label") == a.label]
@@ -1199,12 +1237,20 @@ def load_plan(path):
     return p
 
 
-def fanout_undo(rex, repo, made, runs):
-    """Close the panes and remove the worktrees and branches this fan-out made, and only those."""
+def fanout_undo(rex, repo, made, runs, inflight=None):
+    """Close the panes and remove the worktrees and branches this fan-out made, and only those.
+    INFLIGHT is the worker whose checkout was running when the call failed: the host may have made it although the answer
+    never came. The plan check proved neither its branch nor its folder existed, so both are ours."""
     for r in runs:
         rex.close(r["block"])
         r["state"] = "closed"
         ledger_update(r)
+    if inflight:  # only a linked worktree on crew/NAME is ours: a folder somebody else made in the meantime stays
+        wt = f"\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{inflight}\""
+        rex.sh(f"r=$(cd -- {shlex.quote(repo)} && pwd) || exit 97; cd -- \"$r\" && wt={wt} && [ -f \"$wt/.git\" ] && "
+               f"[ \"$(git -C \"$wt\" symbolic-ref -q --short HEAD)\" = crew/{inflight} ] && {{ git worktree remove --force \"$wt\" >/dev/null 2>&1; "
+               f"rm -rf \"$wt\"; git worktree prune; git branch -D crew/{inflight} >/dev/null 2>&1; "
+               f"rmdir \"$(dirname \"$wt\")\" \"$(dirname \"$(dirname \"$wt\")\")\" 2>/dev/null; :; }}")
     if made:
         rm = "".join(f"git worktree remove --force {shlex.quote(p)} >/dev/null 2>&1; rm -rf {shlex.quote(p)}; "
                      f"git worktree prune; git branch -D {shlex.quote(b)} >/dev/null 2>&1; "
@@ -1231,16 +1277,18 @@ def cmd_fanout(rex, a):
                           f"{check}echo {m}READY", repo, m)
     if errs:
         die("plan refused, nothing was created: " + "; ".join(errs), 2)
-    made, runs = [], []
+    made, runs, inflight = [], [], None
     try:
         for w in plan["workers"]:
+            inflight = w["name"]
             made.append((checkout(rex, w["name"], repo, plan["base"], None, plan["copy"]), "crew/" + w["name"]))
+            inflight = None
         for w, (path, _) in zip(plan["workers"], made):
             ns = argparse.Namespace(name=w["name"], dir=path, task=None, task_bytes=w["body"], verify=plan["verify"],
                                     verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False, preamble_bytes=pre)
             runs.append(start(rex, ns, plan["claude_args"]))
     except BaseException as e:  # die() raises SystemExit; Ctrl-C too: leave nothing behind
-        fanout_undo(rex, repo, made, runs)
+        fanout_undo(rex, repo, made, runs, inflight)
         if not isinstance(e, KeyboardInterrupt):
             warn(f"fanout rolled back: {len(made)} checkout(s) and {len(runs)} worker(s) removed again")
         raise
@@ -1274,7 +1322,7 @@ def watched(cmd, vt, m):
             "vf=$(mktemp \"${TMPDIR:-/tmp}/rex-crew-verify.XXXXXX\") || exit 96; "
             f"( unset -f git; {cmd}\n) </dev/null >\"$vf\" 2>&1 & vp=$!; "
             f"( sleep {vt}; : > \"$vf.to\"; l=$(tree $vp); kill -s TERM $l 2>/dev/null; sleep 3; kill -s KILL $l 2>/dev/null ) </dev/null >/dev/null 2>&1 & wp=$!; "
-            f"wait $vp 2>/dev/null; vrc=$?; kt $wp TERM; if [ -e \"$vf.to\" ]; then vrc=timeout; fi; "
+            f"wait $vp 2>/dev/null; vrc=$?; {{ kt $wp TERM; wait $wp; }} 2>/dev/null; if [ -e \"$vf.to\" ]; then vrc=timeout; fi; "
             f"echo {m}VOUT; tail -n 15 \"$vf\" | tail -c 4000 | awk '{{gsub(/@@/,\"@ @\"); print}}'; rm -f \"$vf\" \"$vf.to\"; echo {m}VRC $vrc; ")
 
 
@@ -1308,7 +1356,13 @@ def cmd_integrate(rex, a):
     vt, stopped, empty = int(a.verify_timeout), None, []
     for i, br in enumerate(brs):
         m = f"@@{os.urandom(6).hex()}"
-        ver = (watched(a.verify, vt, m) + "if [ \"$vrc\" != 0 ]; then git reset -q --hard \"$before\"; git clean -fdq; fi; ") if a.verify else ""
+        # The merge is committed only after the verify passed (--no-commit): a host shell that dies during the verify
+        # leaves a merge in progress that the next call refuses, never a merge commit nobody checked.
+        ver = (watched(a.verify, vt, m) + "if [ \"$vrc\" != 0 ]; then git reset -q --hard \"$before\"; git clean -fdq; "
+               "else git commit -q --no-edit >/dev/null 2>&1 || { git reset -q --hard \"$before\"; git clean -fdq; echo " + m + "CFAIL; }; "
+               "vl=$(git status --porcelain --untracked-files=all | wc -l | tr -d ' '); "
+               f"if [ \"$vl\" != 0 ]; then echo {m}VLEFT $vl; git reset -q --hard HEAD; git clean -fdq; fi; fi; ") if a.verify else ""
+        nc = " --no-commit" if a.verify else ""
         rc, out = rex.sh(
             f"cd -- {repo} || exit 97; export LC_ALL=C; {safe}before=$(git rev-parse HEAD) || exit 96; "
             f"sha=$(git rev-parse --verify -q refs/heads/{br}) || {{ echo {m}GONE; exit 0; }}; "
@@ -1316,10 +1370,10 @@ def cmd_integrate(rex, a):
             f"if [ -n \"$wtp\" ]; then echo {m}WTDIRTY $(git -C \"$wtp\" status --porcelain 2>/dev/null | wc -l | tr -d ' '); fi; "
             f"am=0; if git merge-base --is-ancestor \"$sha\" HEAD && git rev-list --parents --merges HEAD | "
             f"awk -v s=\"$sha\" '{{for(i=3;i<=NF;i++) if($i==s) f=1}} END{{exit !f}}'; then am=1; fi; "
-            f"mo=$(git merge --no-ff --no-edit -m \"Merge branch '{br}'\" \"$sha\" 2>&1); mrc=$?; "
+            f"mo=$(git merge --no-ff --no-edit{nc} -m \"Merge branch '{br}'\" \"$sha\" 2>&1); mrc=$?; "
             f"if [ $mrc -ne 0 ]; then echo {m}CONFLICT; git -c core.quotepath=false diff --name-only --diff-filter=U | head -n 30; echo {m}NCONF $(git diff --name-only --diff-filter=U | wc -l | tr -d ' '); echo {m}MSG; printf '%s\\n' \"$mo\" | tail -n 5; "
             f"git merge --abort >/dev/null 2>&1; if [ -n \"$(git status --porcelain --untracked-files=all)\" ]; then git reset -q --hard \"$before\"; fi; "
-            f"elif [ \"$(git rev-parse HEAD)\" = \"$before\" ]; then echo {m}EMPTY $am; else echo {m}MERGED; {ver}fi; "
+            f"elif [ \"$(git rev-parse HEAD)\" = \"$before\" ] && ! git rev-parse -q --verify MERGE_HEAD >/dev/null; then echo {m}EMPTY $am; else echo {m}MERGED; {ver}fi; "
             f"echo {m}STATE $(git status --porcelain --untracked-files=all | wc -l | tr -d ' ') $(git rev-parse --short HEAD); echo {m}END")
         end = re.search("^" + re.escape(m) + r"STATE (\d+) (\S+)$", out, re.M)
         part = lambda x, y: out.split(m + x, 1)[1].split(m + y, 1)[0].strip("\n") if m + x in out else ""
@@ -1348,6 +1402,9 @@ def cmd_integrate(rex, a):
         elif m + "EMPTY" in out:
             print(f"{br}: nothing to merge: no commits that the current branch lacks; did the worker commit?{note}")
             empty.append(br)
+        elif m + "CFAIL" in out:
+            print(f"{br}: merge failed: the verify passed but git refused to commit the merge (a hook?), merge undone" + note)
+            stopped = (br, 1, end)
         elif m + "VRC" in out and not re.search("^" + re.escape(m) + r"VRC 0$", out, re.M):
             vr = re.search("^" + re.escape(m) + r"VRC (\S+)$", out, re.M).group(1)
             print(f"{br}: " + (f"verify did not finish within {vt}s and was killed" if vr == "timeout" else f"verify failed (exit {vr})")
@@ -1357,7 +1414,9 @@ def cmd_integrate(rex, a):
                 print(data(tail, "  "))
             stopped = (br, 1, end)
         else:
-            print(f"{br}: merged" + (" (verify ok)" if a.verify else "") + note)
+            left = re.search("^" + re.escape(m) + r"VLEFT (\d+)$", out, re.M)
+            print(f"{br}: merged" + (" (verify ok)" if a.verify else "")
+                  + (f"; the verify left {left.group(1)} changed or untracked path(s) in the tree: removed" if left else "") + note)
         if stopped:
             for rest in brs[i + 1:]:
                 print(f"{rest}: not attempted")
@@ -1454,6 +1513,10 @@ def main():
     sc.set_defaults(fn=cmd_screen)
     st = sub.add_parser("status", help="every reporting pane in the session: state, label, block, open question")
     st.add_argument("--all", action="store_true", help="also panes that report no status"); st.set_defaults(fn=cmd_status)
+    sy = sub.add_parser("strays", help="panes of the session that no ledger entry knows (a start that died half way); --adopt or --close")
+    sg = sy.add_mutually_exclusive_group()
+    sg.add_argument("--adopt", action="store_true", help="record panes that a recent start claimed as open workers"); sg.add_argument("--close", action="store_true", help="close panes that a recent start claimed")
+    sy.set_defaults(fn=cmd_strays)
     cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.set_defaults(fn=cmd_close)
     ss = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)

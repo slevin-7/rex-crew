@@ -86,6 +86,7 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 # runs.json.corrupt-<time>, never overwritten (the newest 5 are kept, older ones are removed); a rex call that gets no answer
 # within REX_CREW_TIMEOUT seconds (default 120) stops with an error naming the host, and a `start` that failed half way closes its pane; a state path that cannot be written stops `start` before any pane opens.
 rex-crew status                      # every reporting pane: state and open question
+rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start killed half way): list; adopt or close those a recent start claimed
 ```
 
 `fanout` reads a plan like this; it refuses the whole plan (exit 2) before creating anything if a name, path, task or option is invalid
@@ -109,7 +110,7 @@ Control characters in a worker's text (ESC, a lone CR) are shown as `?`, and its
 
 `integrate` merges `crew/api`, `crew/docs` into the branch REPO has checked out, one at a time, and prints per branch `merged`, `conflict:` with the
 files, `merge failed`, `verify failed` (that merge is undone) or `nothing to merge` (already merged, or the worker committed nothing). It stops at the first conflict or
-failed verify with a clean tree (exit 1) and refuses up front (exit 2) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
+failed verify with a clean tree (exit 1). The merge is committed only after the verify passed, and files the verify leaves in the tree are removed (the line says how many). It refuses up front (exit 2) if REPO has uncommitted or untracked files, a detached HEAD or a missing branch.
 `skills/rex-crew/SKILL.md` has the details.
 
 Exit status of `run` and `collect`: `0` clean result, `1` finished but not clean (no report, a report without a real STATUS line, a symlinked or
