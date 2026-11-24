@@ -60,6 +60,7 @@ B=$("$here/rex-crew" checkout docs /abs/repo)
 "$here/rex-crew" start api  "$A" api.md  --verify 'npm test' --trust -- --permission-mode acceptEdits
 "$here/rex-crew" start docs "$B" docs.md --trust -- --permission-mode acceptEdits
 "$here/rex-crew" collect --policy policy.json      # prints each report as its worker ends
+"$here/rex-crew" collect --policy policy.json --brief   # the essentials only (also `run --brief`)
 ```
 
 A worker that needs you is printed with its block id in the header, for every such worker at once; use that id for the commands below:
@@ -70,9 +71,16 @@ needs you (permission): Bash: make deploy
 ```
 
 `collect` exits 0 when every worker is done, and 2 when any needs you (2 wins over every other code, also over an error); it names the workers still running. A report is printed once: a later `collect` says `no open workers`, and `runs` shows what finished.
+
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
 answer, then run `collect` again at once. If a host call fails for one worker, only that worker is reported (exit 4); `collect NAME` again. A Rex host that does not answer one call within `REX_CREW_TIMEOUT` seconds (default 120) is an error that names the host, not a hang. Text for `send` and `sh` may start with a dash (`send BLOCK -1`). A worker whose first status is `done` is collected after two looks, and two `collect` processes report a worker only once.
 An unclean result is printed as `state: unclean`. A worker counts as finished after two `idle` looks in a row. Run it in the background when you have other work: you are woken when it exits.
+
+`--brief` prints per worker the header, every `ATTENTION:` line, the git and verify lines and only the report's CHANGED and OPEN sections (capped; a missing
+section is said so, never left out silently), then a tally such as `3 done, 1 unclean, 1 needs you`. Exit codes and the default output are unchanged.
+`--preamble FILE` on `start`, `run` and `fanout` (plan key `"preamble"`, relative to the plan; the option wins) appends your standing instructions to every task
+before the report protocol; a missing or empty file exits 2 before anything starts. The protocol already tells workers that plain reads (`git status`,
+`grep -n`, `sed -n`) pass and `sh -c`, `<( )`, `$( )`, env prefixes and other redirects wait for a human: your policy still decides what passes.
 `checkout` accepts a relative repo path (resolved on the host); NAME follows the same rules as for `start`. `checkout --copy` brings untracked files a fresh worktree lacks (generated project files, local config).
 Parallel workers do not know about each other's changes: merge them with `integrate` (below) and verify the merged result.
 
@@ -157,7 +165,9 @@ pass through your policy (`"^(Write|Edit): /abs/dir/"`).
 "$here/rex-crew" answer BLOCK --text 2024         # free text that is only digits (without --text, digits pick that option)
 ```
 
-Then `collect` again. `needs you (question): ...` shows the question and its options.
+Then `collect` again. `needs you (question): ...` shows the question and its options, followed by the exact `approve`/`deny`/`answer` lines to copy
+(with `-S`/`-s` filled in). For a permission prompt the `approve` line carries `--match` for exactly that prompt, so it presses Yes only if the prompt is still the one shown;
+a prompt with control characters or several lines gets no `--match`: read `screen BLOCK` first. Control characters in worker text are printed as `?`.
 
 ## What "done" means
 

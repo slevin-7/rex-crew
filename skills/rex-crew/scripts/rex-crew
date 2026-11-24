@@ -28,7 +28,32 @@ NEXT: one suggestion for a follow-up
 
 Rules: do not rename the Rex session, do not push, run one shell command per call.
 If only the user can decide something, ask and wait instead of guessing.
+Plain read commands such as `git status`, `git log`, `git diff`, `git show`, `grep -n PATTERN FILE`, `sed -n A,Bp FILE`, `ls` and `cat`
+usually pass without waiting. Wrapped in `sh -c '...'`, with `<( )`, `$( )` or backticks, behind an env prefix
+(`VAR=x cmd`) or with a redirect other than `2>&1`, even a harmless read waits for a human: write it plainly instead.
 """
+
+def read_preamble(path):
+    """The orchestrator's standing instructions, read before anything is created: a bad file is a clear exit 2."""
+    try:
+        with open(os.path.expanduser(path), "rb") as f:
+            data = f.read()
+    except OSError as e:
+        die(f"cannot read the preamble {path}: {e}", 2)
+    if not data.strip():
+        die(f"the preamble {path} is empty: give a file with the standing instructions, or leave --preamble out", 2)
+    return data
+
+
+def clean(text):
+    """Worker text as display text: CRLF becomes LF; other control characters (ESC, a lone CR that overwrites the
+    line, NUL) become '?', so a worker cannot clear the screen or hide a line it wrote."""
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "?", str(text).replace("\r\n", "\n"))
+
+
+def oneline(text, n):
+    """One line of at most n characters: a worker's text must not start lines of the orchestrator's output."""
+    return " ".join(clean(text).split())[:n]
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
@@ -495,12 +520,12 @@ def tick(rex, run, policy):
             if n and time.time() - at < 10:
                 return None  # the same prompt is still up right after our key: wait, do not type a second 1
             if n >= 3:
-                return {"state": "blocked", "kind": kind, "question": text + "  (approved 3 times, the prompt stays)"}
+                return {"state": "blocked", "kind": kind, "prompt": text, "question": text + "  (approved 3 times, the prompt stays)"}
             if approve_once(rex, run["block"], text):
                 run["press"] = [text, n + 1, time.time()]
                 run.setdefault("approved", []).append(text)
                 return None
-        return {"state": "blocked", "kind": kind, "question": text}
+        return {"state": "blocked", "kind": kind, "prompt": text, "question": text}
     elif state == "none" and age > 15 and not run.get("seen"):
         # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
         return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
@@ -516,6 +541,11 @@ def start(rex, a, agent_args):
             task = sys.stdin.buffer.read() if a.task == "-" else open(os.path.expanduser(a.task), "rb").read()
     except OSError as e:
         die(f"cannot read the task: {e}", 2)
+    pre = getattr(a, "preamble_bytes", None)
+    if pre is None and getattr(a, "preamble", None):
+        pre = read_preamble(a.preamble)
+    if pre:
+        task = task + b"\n\n---\n## Standing instructions from the orchestrator\n" + pre.strip() + b"\n"
     # A symlinked DIR and its real path are the same directory: compare what the host resolves.
     _, rd = rex.sh(f"printf '@@DIR %s@@END\\n' \"$(cd -- {shlex.quote(a.dir)} 2>/dev/null && pwd -P)\"")
     hit = re.search(r"@@DIR (.+?)@@END", rd, re.S)
@@ -620,7 +650,7 @@ def finish(rex, run):
     if len(body) > REPORT_MAX:
         body = body[:REPORT_MAX]
         notes.append(f"the report is longer than {REPORT_MAX} bytes: cut")
-    report = body.decode("utf-8", "replace").strip()
+    report = clean(body.decode("utf-8", "replace")).strip()
     if rc0 == 97:
         notes.append("the directory is gone on the host: nothing could be read")
     elif m + "REPORT" not in out or m + "RC" not in out:
@@ -642,24 +672,83 @@ def finish(rex, run):
     return res
 
 
-def show(run, res):
+SECTIONS = ("CHANGED", "OPEN")
+_HEAD = re.compile(r"^[ \t>#*`_]*(STATUS|CHANGED|VERIFIED|COMMIT|OPEN|NEXT)[*`_ \t]*:[*`_ \t]*(.*)$|^#+[ \t]*(STATUS|CHANGED|VERIFIED|COMMIT|OPEN|NEXT)[ \t]*$")
+BRIEF_LINES, BRIEF_WIDTH = 12, 160
+
+
+def brief_report(report):
+    """Only the CHANGED and OPEN sections of a report, capped. A section the worker left out is said so: silence would read as 'nothing'."""
+    secs, cur = {}, None
+    for line in report.splitlines():
+        m = _HEAD.match(line)
+        if m:
+            cur = m.group(1) or m.group(3)
+            secs.setdefault(cur, [])
+            if (m.group(2) or "").strip():
+                secs[cur].append(m.group(2).strip())
+        elif cur:
+            secs[cur].append(line.strip())
+    out = []
+    for key in SECTIONS:
+        body = [l for l in secs.get(key, []) if l]
+        if key not in secs:
+            out.append(f"{key}: (missing from the report: read it without --brief)")
+            continue
+        cut = lambda l: l if len(l) <= BRIEF_WIDTH else l[:BRIEF_WIDTH] + "..."
+        if not body:
+            out.append(f"{key}: (empty)")
+        elif len(body) == 1:
+            out.append(f"{key}: {cut(body[0])}")
+        else:
+            out += [f"{key}:"] + ["  " + cut(l) for l in body[:BRIEF_LINES]]
+            if len(body) > BRIEF_LINES:
+                out.append(f"  (+{len(body) - BRIEF_LINES} more lines: read the full report without --brief)")
+    return "\n".join(out)
+
+
+def answer_lines(run, res):
+    """The exact command lines that answer what a worker asked, ready to copy."""
+    q = shlex.quote
+    pre = "rex-crew" + (f" -S {q(run['host'])}" if run.get("host") else "") + f" -s {q(run['session'])}"
+    b, kind, prompt = q(run["block"]), res.get("kind") or "", res.get("prompt") or ""
+    if res["state"] == "error" or kind == "startup":
+        return [f"look:    {pre} screen {b}", f"close:   {pre} close {b}"]
+    if kind == "question":
+        return [f"answer:  {pre} answer {b} 1        (an option number; {pre} screen {b} shows them)",
+                f"or free text:  {pre} answer {b} {q('your text')} --text"]
+    if kind == "permission":
+        # --match makes the copy safe: it presses Yes only if the prompt still open is exactly this one
+        match = f" --match {q('^' + re.escape(prompt) + chr(92) + 'Z')}" if prompt and clean(prompt) == prompt and "\n" not in prompt and len(prompt) <= 500 else ""
+        look = "" if match else f"look first:  {pre} screen {b}\n"
+        return [look + f"approve: {pre} approve {b}{match}", f"deny:    {pre} deny {b}"]
+    return []
+
+
+def show(run, res, brief=False):
     """Compact, stable text for the orchestrator: facts first, the worker's words last."""
     print(f"== {run['name']}   state: {res['state']}   {int(time.time() - run['t0'])}s"
           + ("" if res["state"] == "done" and not run.get("keep") and not res.get("attention") else f"   block: {run['block']}"))
-    if run.get("approved"):
-        print(f"auto-approved ({len(run['approved'])}): " + " | ".join(x[:60] for x in run["approved"][-5:]))
+    if run.get("approved") and not brief:
+        print(f"auto-approved ({len(run['approved'])}): " + " | ".join(oneline(x, 60) for x in run["approved"][-5:]))
     if res["state"] in ("blocked", "error"):
-        print(f"needs you ({res.get('kind') or res['state']}): {res.get('question') or '(no message; look at the pane)'}")
+        ask = clean(res.get("question") or "(no message; look at the pane)").replace("\n", "\n    ")
+        print(f"needs you ({res.get('kind') or res['state']}): {ask}")
+        for x in answer_lines(run, res):
+            print("  " + x)
     if "git" in res:
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
         print("git: " + " · ".join(res["git"].splitlines()))
         if res["verify_rc"] != "none":
-            print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + res["verify_tail"]))
-        print("report:\n" + (res["report"] or "(none)"))
+            tail = clean(res["verify_tail"])
+            if brief:
+                tail = "\n".join(oneline(l, BRIEF_WIDTH) for l in tail.splitlines()[-6:])
+            print(f"verify: exit {res['verify_rc']}" + ("" if res["verify_rc"] == "0" else "\n" + tail))
+        print(brief_report(res["report"]) if brief and res["report"] else "report:\n" + (res["report"] or "(none)"))
 
 
-def collect(rex, policy, timeout, only=None, rid=None):
+def collect(rex, policy, timeout, only=None, rid=None, brief=False):
     """Watch every open worker of this session. Returns when all are done, or one needs a person."""
     runs = [r for r in mine(rex) if (not only or r["name"] == only) and (not rid or r["id"] == rid)]
     if not runs:
@@ -674,6 +763,8 @@ def collect(rex, policy, timeout, only=None, rid=None):
     t0, worst, asked, first = time.time(), 0, False, True
     base = {r["id"]: (r["state"], r.get("t0")) for r in runs}
     pressed = 0  # keys we pressed for workers so far
+    tally = {}  # outcome -> how many were reported (for --brief)
+    count = lambda k: tally.__setitem__(k, tally.get(k, 0) + 1)
 
     def claim(r):
         """Take the end of this worker under the lock, unless another process already did (then it is theirs to report)."""
@@ -712,10 +803,12 @@ def collect(rex, policy, timeout, only=None, rid=None):
             r["state"] = "open"  # not read yet: the next collect picks it up again
             print(f"== {r['name']}   state: error   block: {r['block']}\nneeds you (host): could not read this worker's state or result "
                   f"(see the message above); run collect {r['name']} again")
+            count("needs you")
             ledger_update(r, base.get(r["id"]))
             worst = max(worst, EXIT["error"])
             return
-        show(r, res)
+        show(r, res, brief)
+        count("needs you" if res["state"] in ("blocked", "error") else res["state"])
         ledger_update(r, base.get(r["id"]))
         worst = max(worst, EXIT[res["state"]])
         asked = asked or res["state"] == "blocked"
@@ -746,6 +839,10 @@ def collect(rex, policy, timeout, only=None, rid=None):
     if runs:
         print("still working: " + ", ".join(r["name"] for r in runs))
         worst = worst or 3
+    if brief:
+        order = ("done", "unclean", "needs you", "gone", "timeout")
+        parts_ = [f"{tally[k]} {k}" for k in order if tally.get(k)] + ([f"{len(runs)} still working"] if runs else [])
+        print(", ".join(parts_) or "nothing reported")
     return 2 if asked else worst  # a question for you outranks every other code
 
 
@@ -759,11 +856,11 @@ def cmd_start(rex, a):
 def cmd_run(rex, a):
     policy = load_policy(a.policy)  # before a pane exists: a bad policy must not leave a started worker behind
     run = start(rex, a, a.agent_args)
-    sys.exit(collect(rex, policy, a.timeout, only=run["name"], rid=run["id"]))
+    sys.exit(collect(rex, policy, a.timeout, only=run["name"], rid=run["id"], brief=a.brief))
 
 
 def cmd_collect(rex, a):
-    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name))
+    sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name, brief=a.brief))
 
 
 def cmd_runs(rex, a):
@@ -899,7 +996,7 @@ def cmd_session(rex, a):
 
 # ---- fanout and integrate ----------------------------------------------------------------------------
 
-PLAN_KEYS = {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", "trust", "workers"}
+PLAN_KEYS = {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", "trust", "preamble", "workers"}
 NAME_RE = r"[a-z][a-z0-9_-]{0,31}"
 
 
@@ -935,6 +1032,16 @@ def load_plan(path):
         bad('"verify_timeout" must be a number of seconds')
     if not isinstance(p.setdefault("trust", False), bool):
         bad('"trust" must be true or false')
+    if "preamble" in p:
+        if not isinstance(p["preamble"], str) or not p["preamble"].strip():
+            bad('"preamble" must be the path of a file with the standing instructions')
+        try:  # relative to the plan file, like task_file
+            with open(os.path.join(os.path.dirname(os.path.abspath(os.path.expanduser(path))), os.path.expanduser(p["preamble"])), "rb") as f:
+                p["preamble_body"] = f.read()
+        except OSError as e:
+            bad(f"cannot read the preamble: {e}")
+        if not p["preamble_body"].strip():
+            bad("the preamble file is empty")
     ws = p.get("workers")
     if not isinstance(ws, list) or not ws:
         bad('"workers" must be a non-empty list')
@@ -983,6 +1090,7 @@ def fanout_undo(rex, repo, made, runs):
 
 def cmd_fanout(rex, a):
     plan = load_plan(a.plan)
+    pre = read_preamble(a.preamble) if a.preamble else plan.get("preamble_body")  # the option wins over the plan's key
     names = [w["name"] for w in plan["workers"]]
     live = sorted({r["name"] for r in mine(rex)} & set(names))
     if live:
@@ -1010,7 +1118,7 @@ def cmd_fanout(rex, a):
             made.append((checkout(rex, w["name"], repo, plan["base"], None, plan["copy"]), "crew/" + w["name"]))
         for w, (path, _) in zip(plan["workers"], made):
             ns = argparse.Namespace(name=w["name"], dir=path, task=None, task_bytes=w["body"], verify=plan["verify"],
-                                    verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False)
+                                    verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False, preamble_bytes=pre)
             runs.append(start(rex, ns, plan["claude_args"]))
     except BaseException as e:  # die() raises SystemExit; Ctrl-C too: leave nothing behind
         fanout_undo(rex, repo, made, runs)
@@ -1170,16 +1278,20 @@ def main():
         q.add_argument("--trust", action="store_true", help="confirm the folder-trust dialog if it names DIR")
         q.add_argument("--verify-timeout", type=int, default=600, help="seconds the verify command may run before it is killed (default 600)")
         q.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
+        q.add_argument("--preamble", metavar="FILE", help="standing instructions appended to the task (before the report protocol)")
 
+    brief_help = "per worker only: header, ATTENTION, git, verify, the report's CHANGED and OPEN (capped); then a one-line tally"
     claude_args = "usage: rex-crew run NAME DIR TASK [options] -- CLAUDE_ARGS\neverything after a bare -- goes to claude, e.g. -- --permission-mode acceptEdits"
     r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it", epilog=claude_args, formatter_class=raw)
     task_args(r); r.add_argument("--policy", help="JSON policy file: {approve: [regex], never: [regex]}; without it nothing is answered for you")
-    r.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3, and `collect` waits again"); r.set_defaults(fn=cmd_run)
+    r.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3, and `collect` waits again")
+    r.add_argument("--brief", action="store_true", help=brief_help); r.set_defaults(fn=cmd_run)
     s = sub.add_parser("start", help="put a task on the host and start a worker; returns at once", epilog=claude_args, formatter_class=raw)
     task_args(s); s.set_defaults(fn=cmd_start)
     c = sub.add_parser("collect", help="wait for the open workers: answer routine prompts, report each as it ends; exit 2 when one needs you")
     c.add_argument("name", nargs="?", help="only this worker"); c.add_argument("--policy", help="JSON: {approve: [regex], never: [regex]}")
-    c.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3 and name who is still working"); c.set_defaults(fn=cmd_collect)
+    c.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3 and name who is still working")
+    c.add_argument("--brief", action="store_true", help=brief_help); c.set_defaults(fn=cmd_collect)
     ru = sub.add_parser("runs", help="what was started in this session (ledger), newest last")
     ru.add_argument("--all", action="store_true", help="every host and session"); ru.add_argument("--last", type=int, help="show this many (default 20)"); ru.set_defaults(fn=cmd_runs)
     co = sub.add_parser("checkout", help="git worktree for one worker on its own branch; prints its path")
@@ -1207,6 +1319,7 @@ def main():
 
     fo = sub.add_parser("fanout", help="one checkout and one worker per entry of a plan file; all or nothing")
     fo.add_argument("plan", help='JSON: {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", "trust", "workers": [{"name", "task_file" or "task"}]}')
+    fo.add_argument("--preamble", metavar="FILE", help='standing instructions appended to every task (or the plan key "preamble"; this option wins)')
     fo.set_defaults(fn=cmd_fanout)
     ig = sub.add_parser("integrate", help="merge the workers' branches (crew/NAME) into REPO's current branch, one at a time")
     ig.add_argument("repo", help="repository on the host"); ig.add_argument("names", nargs="+", metavar="NAME")
