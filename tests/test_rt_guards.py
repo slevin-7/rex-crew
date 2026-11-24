@@ -143,6 +143,20 @@ class Guards(Base):
         self.assertIsNone(m.risky("fix the 2 failing tests"))
         self.assertIsNone(m.risky("2 tests are red", claude=False))
 
+    def test_session_from_rex_block_when_rex_session_is_gone(self):
+        # Rex server preview.23 sets only REX_BLOCK in new terminals; rex whoami names the session of that block
+        b = self.started(rec("idle"))
+        with mock.patch.dict(os.environ, {"REX_BLOCK": "block:orch", "FAKE_REX_WHOAMI_SESSION": "s1"}):
+            os.environ.pop("REX_CREW_SESSION"); os.environ.pop("REX_SESSION", None)
+            code, out, err = self.cli("send", b, "next", "step")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.keys(b), ["next step", "enter"])
+        with mock.patch.dict(os.environ, {"REX_BLOCK": "block:orch"}):
+            os.environ.pop("REX_CREW_SESSION"); os.environ.pop("REX_SESSION", None)
+            code, out, err = self.cli("status")
+        self.assertEqual(code, 6, out + err)  # rex cannot say: the old message, no guess
+        self.assertIn("no session", err)
+
 
 if __name__ == "__main__":
     unittest.main()

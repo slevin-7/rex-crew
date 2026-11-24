@@ -2056,6 +2056,19 @@ def cmd_integrate(rex, a):
     sys.exit(1 if empty else 0)
 
 
+def own_session():
+    """The session of the Rex pane this runs in. Rex servers from preview.23 on set only REX_BLOCK in new terminals, no
+    REX_SESSION; `rex whoami` names the session that holds REX_BLOCK. None outside a Rex pane or when rex cannot say."""
+    if not os.environ.get("REX_BLOCK"):
+        return None
+    try:
+        p = subprocess.run(["rex", "whoami", "--json"], capture_output=True, text=True, timeout=min(30, rpc_timeout()))
+        sid = jload(p.stdout).get("session_id") if p.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+    return sid if isinstance(sid, str) and re.fullmatch(r"[\w:.-]{1,200}", sid) else None
+
+
 def selftest():
     ap, nv = [re.compile(r"^Bash: (rtk )?(git (status|log)|make test|tail|head|grep)\b")], [re.compile(r"\brm\b|git push")]
     assert routine("Bash: git status --short", ap, nv)
@@ -2194,7 +2207,7 @@ def main():
         if not literal[1]:
             p.error(f"the following arguments are required: {literal[0]}")
         setattr(a, literal[0], literal[1])
-    session = a.session or (None if a.host else os.environ.get("REX_SESSION"))
+    session = a.session or (None if a.host else os.environ.get("REX_SESSION") or own_session())
     if not session and a.cmd not in ("session", "runs"):
         die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", USAGE)
     a.fn(Rex(a.host, session), a)

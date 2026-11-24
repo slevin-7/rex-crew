@@ -153,6 +153,9 @@ def dispatch(argv):
         elif pos[0] in ("enter", "escape"):
             blk["typed"] = ""
         save(st)
+    elif cmd == "whoami":  # FAKE_REX_WHOAMI_SESSION: the session that holds REX_BLOCK
+        sid = os.environ.get("FAKE_REX_WHOAMI_SESSION")
+        print(json.dumps({"session_id": sid, "block_id": os.environ.get("REX_BLOCK")} if sid else {"session_count": 0}))
     elif cmd == "ls":
         print(json.dumps({"sessions": st["sessions"]}))
     elif cmd == "new":
