@@ -85,7 +85,8 @@ rex-crew runs                        # ledger of started workers, kept on disk a
 # The ledger is ~/.local/state/rex-crew/runs.json (override: REX_CREW_STATE). An unreadable file is moved aside as
 # runs.json.corrupt-<time>, never overwritten (the newest 5 are kept, older ones are removed); a rex call that gets no answer
 # within REX_CREW_TIMEOUT seconds (default 120) stops with an error naming the host, and a `start` that failed half way closes its pane; a state path that cannot be written stops `start` before any pane opens.
-rex-crew status                      # every reporting pane: state and open question
+rex-crew status [BLOCK] [--full]    # every reporting pane: state and open question; BLOCK or --full print the whole prompt; blocked: how long it waits
+rex-crew collect --waiting-after 120 --stalled-after 600   # LONG WAIT line for a prompt open that long; names a worker whose screen did not change (also on run)
 rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start killed half way): list; adopt or close those a recent start claimed
 ```
 
@@ -102,6 +103,8 @@ rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start kill
 `--preamble FILE` (on `start`, `run`, `fanout`; in a plan: `"preamble": "file.md"`, relative to the plan, the option wins) appends your standing
 instructions to every task, just before the report protocol. The file must exist and not be empty, or nothing is started (exit 2). The protocol itself
 tells workers which read commands pass without waiting (plain `git status`, `grep`, `sed -n`) and which do not (`sh -c`, `<( )`, `$( )`, env prefixes).
+
+Waiting is visible: for a blocked worker `collect` (also `--brief`) prints `waiting: 35m00s on this prompt` and, past `--waiting-after` seconds (default 120), a `LONG WAIT` line; `status` and `runs` show `waiting 35m00s` too. The clock starts at the worker's own `updated_at` when that is a plausible time (never before the turn started, never in the future), else at the first look; an answer, `approve` or `deny` resets it. A `working` worker whose screen (spinner and counter lines ignored) has not changed for `--stalled-after` seconds (default 600) is named in `still working:` and in `runs`; `status` shows it from 60 s on. `status` cuts a prompt at 100 characters and says so; `status BLOCK` or `status --full` print the whole prompt on `|` lines, so `approve --match` patterns can be judged.
 
 `--brief` shortens what `collect` and `run` print and leaves exit codes alone: a section missing from a report is said so
 (`OPEN: (missing from the report ...)`), a long section is cut with a count of the lines left out. The default output is unchanged. A question
