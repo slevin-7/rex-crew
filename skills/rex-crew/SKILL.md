@@ -70,6 +70,8 @@ A worker that needs you is printed with its block id in the header, for every su
 needs you (permission): Bash: make deploy
 ```
 
+A worker that waits for you is not busy: `collect` (also `--brief`) prints `waiting: 35m00s on this prompt` under `needs you`, and a `LONG WAIT` line once the prompt has been open longer than `--waiting-after SECS` (default 120); `runs` shows `waiting ...` for a blocked worker. A `working` worker whose screen did not change for `--stalled-after SECS` (default 600) is named in `still working: NAME (screen unchanged ...)`: look at it with `screen`. Both options also exist on `run`.
+
 `collect` exits 0 when every worker is done, and 2 when any needs you (2 wins over every other code, also over an error); it names the workers still running. A report is printed once: a later `collect` says `no open workers`, and `runs` shows what finished.
 
 Before handing back it presses routine keys for the other workers for up to about 12 s more, but nobody presses keys after it exits:
@@ -197,7 +199,7 @@ exit 1, so read the lines above a worker's summary first.
 
 | Command | |
 |---|---|
-| `status [--all]` | Every reporting pane: state, label, block, open question. |
+| `status [BLOCK] [--full] [--all]` | Every reporting pane: state, label, block, open question (cut at 100 characters, and the cut is said; `BLOCK` or `--full` print the whole prompt on `|` lines), plus `waiting 35m00s` for a blocked worker and `screen unchanged ...` for a working one whose screen has not moved. |
 | `sh COMMAND` | Run one shell command on the host and print its output: git, a build, a look at a file. |
 | `runs [--all]` | The ledger: workers started in this session (all sessions when none is set), with state, block, session and age. Stored in `REX_CREW_STATE` (default `~/.local/state/rex-crew/runs.json`); a corrupt file is kept as `runs.json.corrupt-<time>`. |
 | `screen BLOCK [LINES]` | The visible end of a pane (no scrollback: long answers belong in the report file). |
