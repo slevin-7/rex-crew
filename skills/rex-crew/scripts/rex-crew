@@ -817,6 +817,8 @@ def show(run, res, brief=False):
         print(f"needs you ({res.get('kind') or res['state']}): {ask}")
         for x in answer_lines(run, res):
             print("  " + x)
+    if res["state"] == "gone":
+        print(f"pane is gone; what the worker left is in {run['dir']} (branch crew/{run['name']} if it came from fanout/checkout)")
     if "git" in res:
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
@@ -840,6 +842,8 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False):
             print(f"{only} already finished: state {known[-1]['state']}")
             return EXIT.get(known[-1]["state"], 0)
         print("no open workers in this session")
+        if elsewhere(rex):
+            print(elsewhere(rex))
         return 0
     t0, worst, asked, first = time.time(), 0, False, True
     base = {r["id"]: (r["state"], r.get("t0")) for r in runs}
@@ -872,6 +876,11 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False):
             r["state"] = res["state"]
             if res["state"] in ("done", "gone") and not claim(r):
                 return  # another collect took this worker's result: it reports it, not this one
+            if res["state"] == "gone":  # the pane is closed, but what the worker left on disk is still worth showing
+                try:
+                    res.update(finish(rex, r))
+                except SystemExit:
+                    pass
             if res["state"] == "done":
                 res.update(finish(rex, r))
                 if res.get("attention"):  # decided before anything is printed: show() must say what counts
@@ -944,12 +953,28 @@ def cmd_collect(rex, a):
     sys.exit(collect(rex, load_policy(a.policy), a.timeout, only=a.name, brief=a.brief))
 
 
+def elsewhere(rex):
+    """A hint for a session with nothing in it: live workers that belong to other sessions or hosts, with the flags that reach them."""
+    q = shlex.quote
+    other = sorted({(r["host"], r["session"]) for r in ledger_load()
+                    if r["state"] in LIVE and (r["host"], r["session"]) != (rex.host or "", rex.session)})
+    return ("live workers exist elsewhere (rex-crew runs --all): "
+            + "; ".join("rex-crew" + (f" -S {q(h)}" if h else "") + f" -s {q(s)}" for h, s in other)) if other else ""
+
+
 def cmd_runs(rex, a):
     at_least_one(a.last, "--last")
-    shown = ledger_load() if a.all else mine(rex, None)
+    # without a session (a new conversation) every run is shown; session and age tell how to address it: -S HOST -s SESSION
+    shown = ledger_load() if a.all or not rex.session else mine(rex, None)
     for r in shown[-a.last:]:
+        t0 = r.get("t0")
+        age = "-" if not isinstance(t0, (int, float)) else (f"{int(max(0, time.time() - t0) // 86400)}d" if time.time() - t0 >= 86400
+                                                           else f"{int(max(0, time.time() - t0) // 3600)}h" if time.time() - t0 >= 3600
+                                                           else f"{int(max(0, time.time() - t0) // 60)}m")
         print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
-                         "" if r["state"] in ("done", "closed", "gone") else r["block"]]))
+                         "" if r["state"] in ("done", "closed", "gone") else r["block"], r["session"] or "-", age]))
+    if not shown and elsewhere(rex):
+        print(elsewhere(rex))
 
 
 def cmd_checkout(rex, a):
@@ -1426,7 +1451,7 @@ def main():
             p.error(f"the following arguments are required: {literal[0]}")
         setattr(a, literal[0], literal[1])
     session = a.session or (None if a.host else os.environ.get("REX_SESSION"))
-    if not session and a.cmd != "session":
+    if not session and a.cmd not in ("session", "runs"):
         die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", 2)
     a.fn(Rex(a.host, session), a)
 
