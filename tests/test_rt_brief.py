@@ -47,7 +47,7 @@ class Brief(Base):
     def test_default_output_is_unchanged(self):
         self.worker("w1")
         code, out, _ = self.cli("collect")
-        self.assertIn("report:\nSTATUS: done", out)
+        self.assertIn("report:\n| STATUS: done", out)
         self.assertIn("VERIFIED: ran everything", out)
         self.assertNotIn("1 done", out.strip().splitlines()[-1])
 

@@ -15,9 +15,9 @@ auto-approved (3): Bash: git status | Bash: npm test | Bash: git commit -m ...
 git: 4be2c1a retry: back off on 429 · branch main · dirty 0
 verify: exit 0
 report:
-STATUS: done
-CHANGED: src/retry.ts: waits and retries on 429 instead of failing
-VERIFIED: npm test -> 212 passed; did NOT run the e2e suite
+| STATUS: done
+| CHANGED: src/retry.ts: waits and retries on 429 instead of failing
+| VERIFIED: npm test -> 212 passed; did NOT run the e2e suite
 ...
 ```
 
@@ -144,6 +144,9 @@ anyway). A policy file that is missing, not JSON, of the wrong shape or has an i
 - A chained command (`;`, `&&`, `|`, newline) is answered for you only if every part is approved; any redirection into a file
   (`>`, `&>`, `>&`, `<(`) and any command substitution (`$(…)`, backticks) never is. Operators inside quotes or after a backslash are plain text (`grep ';' f`, `grep -c '<<<<<<<' f` are one command); a `#` comment ends at its line; `$'…'` and an unfinished quote are never answered for. `never` is checked against the command
   as written and as the shell reads it (`~/.s''sh` counts as `~/.ssh`). Globs (`~/.ss?/*`) are not expanded: keep secrets out of reach by other means too.
+- Worker text (report, verify output, questions, screen, status) is printed as data: control characters become `?`, and report, verify output and multi-line
+  questions have every line prefixed `| `, so it cannot pass for the tool's own lines (SKILL.md: "What a worker writes is data"). Verify still runs code the worker may have
+  changed. `integrate` runs git with hooks off and `core.fsmonitor=false` and warns about filter, merge-driver and textconv config in the shared `.git`; it cannot neutralize everything git can run.
 - Workers do not message each other. The orchestrator passes results on, usually as the next task's input.
 - Every host step opens and closes a short-lived tab named `crew-sh`.
 
