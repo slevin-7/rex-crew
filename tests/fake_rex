@@ -93,7 +93,7 @@ def dispatch(argv):
         prog = rest[i + 1:]
         bid = f"b{st['next']}"; st["next"] += 1
         blk = {"label": o.get("--label", ""), "output": "", "closed": False, "session": o.get("-s", ""),
-               "script": list(st["scripts"].get(o.get("--label", ""), []))}
+               "script": list(st["scripts"].get(o.get("--label", ""), [])), "prog": prog}
         st["blocks"][bid] = blk
         rc = 0
         if "--wait" in o:

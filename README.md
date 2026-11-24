@@ -1,6 +1,6 @@
 # rex-crew
 
-Plan on one machine, build on another. `rex-crew` lets a coding agent (or you) hand tasks to Claude Code
+Plan on one machine, build on another. `rex-crew` lets a coding agent (or you) hand tasks to Claude Code or Codex
 workers running in [Rex](https://www.superlogical.com/rex) panes, on this machine or on any Rex host, and get
 back a short, checkable result instead of a screen to read.
 
@@ -41,10 +41,10 @@ into dialogs, and guessing whether "done" is true. `rex-crew` folds that into on
 ## Requirements
 
 - Rex with the `rex` CLI, and a Rex host for remote work (`rex hosts`)
-- Claude Code on the machine that runs workers, in a version that reports its status to Rex, and logged in there
+- Claude Code, and/or the Codex CLI for `--agent codex`, on the machine that runs workers, in a version that reports its status to Rex, and logged in there
 - Python 3.9 or later on the orchestrating machine; `sh`, `base64` and `git` on the host
 
-Tested with Rex 0.1.0-preview.21 and Claude Code 2.1.330 on macOS, orchestrating from one Mac to another.
+Tested with Rex 0.1.0-preview.21 and Claude Code 2.1.330 on macOS, orchestrating from one Mac to another. Codex workers: codex-cli 0.166.0 (see "Codex workers").
 Rex is in beta: commands may change.
 
 ## Install
@@ -62,7 +62,7 @@ Nothing is copied; `install.sh --uninstall` removes the two links. Agents then f
 export REX_CREW_HOST=buildbox
 export REX_CREW_SESSION=$(rex-crew session my-task)     # creates the session on the host if missing
 
-rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [--preamble F] [--brief] [-- CLAUDE_ARGS]
+rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [--preamble F] [--brief] [--agent claude|codex] [--codex-hooks skip|trust] [-- AGENT_ARGS]
 
 # several at once: one checkout each, start all, collect
 A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
@@ -90,7 +90,7 @@ rex-crew collect --waiting-after 120 --stalled-after 600   # LONG WAIT line for 
 rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start killed half way): list; adopt or close those a recent start claimed
 ```
 
-`fanout` reads a plan like this; it refuses the whole plan (exit 6) before creating anything if a name, path, task or option is invalid
+`fanout` reads a plan like this (`"claude_args"` is the older name of `"agent_args"`; a plan may also set `"agent"` and `"codex_hooks"`, and a worker `"agent"` and `"agent_args"`: see "Codex workers"); it refuses the whole plan (exit 6) before creating anything if a name, path, task or option is invalid
 (including a misspelled key), and removes what it created if a later step fails:
 
 ```jsonc
@@ -150,9 +150,27 @@ A `$` is a real expansion (and the prompt is never answered for you) when sh wou
 A command may be wrapped in `time`, `time -p` or `timeout [-k D] [-s SIG] DURATION`: the wrapped command is the one matched against `approve` and `never` (`never` also sees the wrapper). Other options of these wrappers (`time -o FILE`) are not recognised, so the prompt is not answered for you.
 An env prefix (`FOO=1 python3 -m unittest`) is never answered for you unless the policy lists the variable's NAME in an optional third key, `"env": ["CI", "FOO"]`; the value must be plain (letters, digits and `_.,:/+@%-`). Names that change what a command loads or runs (`LD_*`, `DYLD_*`, `GIT_*`, `PATH`, `PYTHON*`, `HOME`, `NODE_*`, `BASH*`, …) make the policy file invalid (exit 2).
 
+## Codex workers
+
+`--agent codex` (on `start` and `run`; in a `fanout` plan the top-level key `"agent"`, and a worker's own `"agent"` overrides it) starts the Codex CLI instead of Claude Code. Everything after `collect` is the same: the report protocol, `--verify`, `--brief`, `--json`, the waiting and stall times and exit codes work unchanged for a Codex worker, and `runs` and `status` show which agent a pane is. Arguments after `--` go to whichever agent is started (`codex ARGS -- PROMPT`). `"agent_args"` is the neutral plan key for them (`"claude_args"` still works; giving both is refused). The plan's arguments belong to the plan's agent: a worker of the other kind gets none unless it has its own `"agent_args"`. An unknown agent, or one that is not installed on the host, is refused before anything is created.
+
+What is different, stated plainly:
+
+- **Startup dialogs.** Codex shows two dialogs before its first turn and does not report them as status. *Folder access* ("Trust this folder?"): with `--trust`, rex-crew presses Enter (the pre-selected "Trust and continue") only if the screen names this worker's directory exactly; any other directory, or no `--trust`, hands it back. *Hooks need review*: a decision for a person, never answered automatically. It comes back as `needs you (startup)` with the screen and one command line per option; `rex-crew answer BLOCK N` presses that digit and nothing else (it works while the worker has reported no status, and only for a number the screen offers). If you decided in advance, `--codex-hooks skip` (continue without trusting: hooks will not run, key 3) or `--codex-hooks trust` (trust all, key 2), or `"codex_hooks"` in a plan, answers it for you, at most 3 times per worker; the default is to ask.
+- **No automatic approvals.** A prompt whose status record says `app: codex` is never answered for you, whatever the policy says; it comes back with the worker's screen, and `approve` refuses it. Codex's permission dialogs are not known well enough to press keys in them. With its default settings Codex created files and wrote the report without asking, so a build task usually needs no approvals; a task that does need one waits for you (answer in the pane, or `close` it and start again with a narrower task).
+- **Tested** against codex-cli 0.166.0 on a real Rex host for launch, status (`working` then `done`, no record before the first turn) and the two dialogs; the rest is covered by tests against a fake host. `send` to a finished Codex worker, and `codex` options placed before `--`, are not tested on a real host.
+
+Build with one agent, review with the other (the directory is free once the first worker is done):
+
+```sh
+A=$(rex-crew checkout api /abs/repo)
+rex-crew run build "$A" build.md --agent codex --trust --codex-hooks skip --verify 'npm test' --brief
+rex-crew run review "$A" review.md --agent claude --policy policy.json --brief   # review.md: read the last commit, change nothing, report findings
+```
+
 ## Limits
 
-- Claude Code only. Other agents' dialogs are not answered; their questions still come back to you.
+- Claude Code and Codex only. Codex's startup dialogs and permission dialogs are not answered for you (see "Codex workers"); any other agent's questions come back to you too.
 - A chained command (`;`, `&&`, `|`, newline) is answered for you only if every part is approved; any redirection into a file
   (`>`, `&>`, `>&`, `<(`) and any command substitution (`$(…)`, backticks) never is. Operators inside quotes or after a backslash are plain text (`grep ';' f`, `grep -c '<<<<<<<' f` are one command); a `#` comment ends at its line; `$'…'` and an unfinished quote are never answered for. `never` is checked against the command
   as written and as the shell reads it (`~/.s''sh` counts as `~/.ssh`). Globs (`~/.ss?/*`) are not expanded: keep secrets out of reach by other means too.

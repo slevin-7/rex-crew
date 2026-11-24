@@ -1,6 +1,6 @@
 ---
 name: rex-crew
-description: "Run Claude Code workers in Rex panes on this machine or another Rex host and stay the planner: one call sends a task, waits on the worker's own status, answers routine permission prompts from a policy, hands every other question back to you, and returns a written report plus what is really on disk. Use for 'run this on the build machine', 'start an agent on HOST', 'orchestrate workers over Rex', 'delegate and report back', or when a worker in a Rex pane waits for an answer. Not for plain Rex tabs or splits: use the rex skill."
+description: "Run Claude Code (or Codex) workers in Rex panes on this machine or another Rex host and stay the planner: one call sends a task, waits on the worker's own status, answers routine permission prompts from a policy, hands every other question back to you, and returns a written report plus what is really on disk. Use for 'run this on the build machine', 'start an agent on HOST', 'orchestrate workers over Rex', 'delegate and report back', or when a worker in a Rex pane waits for an answer. Not for plain Rex tabs or splits: use the rex skill."
 ---
 
 # rex-crew
@@ -21,7 +21,7 @@ export REX_CREW_SESSION=$("$here/rex-crew" session my-task)    # a session on th
   -- --permission-mode acceptEdits
 ```
 
-`run` is `start` plus `collect` for one worker. It puts `task.md` (or `-` for stdin) on the host, appends the report protocol, starts Claude Code in a new
+`run` is `start` plus `collect` for one worker. It puts `task.md` (or `-` for stdin) on the host, appends the report protocol, starts the worker (Claude Code, or Codex with `--agent codex`) in a new
 tab with the task as its first prompt, and waits. Its output is all you need to read:
 
 ```text
@@ -112,8 +112,8 @@ crew/docs: conflict: docs/api.md, README.md
 stopped at crew/docs; the tree is clean at 4be2c1a
 ```
 
-Plan keys: `repo` (required), `base` (default HEAD), `copy`, `claude_args`, `verify`, `verify_timeout`, `trust`, `workers`. A worker has
-`name` plus exactly one of `task_file` (relative to the plan file) or `task`. A misspelled key, a bad or repeated NAME, an unreadable or empty task,
+Plan keys: `repo` (required), `base` (default HEAD), `copy`, `agent`, `agent_args` (or the older `claude_args`, never both), `codex_hooks`, `verify`, `verify_timeout`, `trust`, `workers`. A worker has
+`name`, optionally `agent` and `agent_args`, plus exactly one of `task_file` (relative to the plan file) or `task`. A misspelled key, a bad or repeated NAME, an unreadable or empty task,
 a `copy` path that is absolute, uses `..` or does not exist, an empty `verify`, a base that is not a commit, an existing branch or checkout of that name,
 or a live worker of the same name refuses the whole plan (exit 6) before anything is created. If a later step fails (or you press Ctrl-C), the panes are
 closed and the worktrees and branches that this call made are removed again (also one whose answer was lost); ones it did not make are never touched.
@@ -226,6 +226,22 @@ exit 1, so read the lines above a worker's summary first.
 4. **One worker per directory at a time** (a symlinked DIR and its real path count as one; a worker in state `error` holds its directory until `close` or its pane is really gone). A second `checkout` of an existing NAME is refused with the path of the first; a failed `--copy` removes its new worktree and branch. Give parallel workers their own checkout (`fanout` does it) and `--copy` the generated files they need.
 5. **Paths are the host's, and absolute.** `$HOME` and `~` are not expanded in `DIR`.
 6. **Never type into your own pane.** `send`, `approve`, `deny` and `close` refuse `$REX_BLOCK`.
+
+## Codex workers
+
+`--agent codex` (`start`, `run`; a plan's `agent`, overridden by a worker's own `agent`) starts the Codex CLI. `collect`, the report protocol, `--verify`, `--brief`, `--json` and the waiting times are the same. Arguments after `--` go to the agent that is started; the plan's `agent_args` go only to workers of the plan's agent. An unknown agent, or one not installed on the host, is refused before anything is created.
+
+- Startup dialogs (not reported as status, state stays empty): *Folder access* is confirmed with Enter by `--trust` only if the screen names exactly this DIR. *Hooks need review* is never answered unless you decided in advance (`--codex-hooks skip` = key 3, `trust` = key 2, plan key `codex_hooks`; at most 3 presses). Otherwise `collect` returns `needs you (startup)` with the screen and a line per option: `"$here/rex-crew" answer BLOCK N` presses that digit and nothing else, also while no status has been reported.
+- Permission prompts of a Codex worker (`app: codex`) are never approved for you, whatever the policy says: they come back with the screen, `approve` refuses them, and the copy-paste line is only `screen` and `close`. With default settings Codex wrote files and the report without asking.
+- Tested with codex-cli 0.166.0; `send` to a Codex worker and agent options before `--` are not verified on a real host.
+
+Build with one, review with the other:
+
+```sh
+A=$("$here/rex-crew" checkout api /abs/repo)
+"$here/rex-crew" run build  "$A" build.md  --agent codex  --trust --codex-hooks skip --verify 'npm test' --brief
+"$here/rex-crew" run review "$A" review.md --agent claude --policy policy.json --brief   # review.md: read the last commit, change nothing, report findings
+```
 
 ## What tends to go wrong
 

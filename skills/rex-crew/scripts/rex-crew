@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rex-crew: let one planning agent run Claude Code workers in Rex panes, here or on another Rex host.
+"""rex-crew: let one planning agent run Claude Code or Codex workers in Rex panes, here or on another Rex host.
 
 `start` puts a task on the host and starts a worker; `collect` waits on the workers' own program
 status, answers routine permission prompts from a policy file, hands every other question back to
@@ -117,6 +117,29 @@ EXIT = {"done": 0, "unclean": 1, "blocked": 2, "timeout": 3, "error": 4, "gone":
 # 5 gone, USAGE for input refused or a command that cannot apply (bad option, unknown NAME, nothing to act on).
 # `approve --match` that differs and `integrate` finding REPO not ready are "needs you" (2): a person must look.
 USAGE = 6
+HOST_PATH = "$HOME/.local/bin:/opt/homebrew/bin"  # added to the host's PATH for the worker's shell
+AGENTS = ("claude", "codex")  # the kinds of worker `--agent` can start
+CODEX_HOOKS = {"skip": "3", "trust": "2"}  # what --codex-hooks presses in Codex's "Hooks need review" dialog
+
+
+def agent_of(run):
+    """Which agent a ledger entry runs; entries from before Codex support are Claude Code."""
+    return run.get("agent") or "claude"
+
+
+def have_agent(agent):
+    """Shell text: stop with @@NOAGENT unless the agent's program is on the PATH the worker will have (a subshell: PATH stays as it is)."""
+    return f"( export PATH=\"{HOST_PATH}:$PATH\"; command -v {agent} >/dev/null 2>&1 ) || {{ echo @@NOAGENT; exit 1; }}; "
+
+
+def check_agent(agent, hooks=None):
+    """Refuse an unknown agent or a hooks decision that cannot apply, before anything is created."""
+    if agent not in AGENTS:
+        die(f"unknown agent {str(agent)[:40]!r}: use one of {', '.join(AGENTS)}", USAGE)
+    if hooks is not None and hooks not in CODEX_HOOKS:
+        die(f"unknown --codex-hooks {str(hooks)[:40]!r}: use skip or trust (or leave it out: a person decides)", USAGE)
+    if hooks is not None and agent != "codex":
+        die("--codex-hooks only applies to --agent codex", USAGE)
 
 
 def exit_of(state):
@@ -645,15 +668,23 @@ def approve_once(rex, block, expect):
 
 # ---- one worker --------------------------------------------------------------------------------------
 
+def names_dir(scr, run):
+    """Does the screen name this worker's directory, and exactly it? A dialog for /x/work2, /x/work/sub or /y/x/work is another
+    directory. A path wrapped over two lines still counts: whitespace may sit between any two characters."""
+    for d in (run.get("dir"), run.get("real")):
+        d = (d or "").rstrip("/")
+        if d and re.search(r"(?<![\w.\-/])" + r"\s*".join(re.escape(c) for c in d) + r"(?![\w.\-]|/[\w.\-])", scr):
+            return True
+    return False
+
+
 def trust(rex, run):
     """Confirm the folder-trust dialog, but only if it names this worker's directory."""
     if time.time() - run.get("trust_at", 0) < 10:
         return True  # we pressed a moment ago; give the dialog time to close instead of pressing again
-    squash = lambda t: re.sub(r"\s", "", t)
     scr = rex.screen(run["block"], 16)
     # Claude Code names the physical directory (the symlink resolved), the task gave the path it was started with.
-    names = [squash(x.rstrip("/")) for x in (run["dir"], run.get("real")) if x]
-    if not (run.get("trust") and "trust" in scr.lower() and any(n in squash(scr) for n in names)):
+    if not (run.get("trust") and "trust" in scr.lower() and names_dir(scr, run)):
         return False
     rex.key(run["block"], "down")  # the default is "No, exit"
     time.sleep(1)
@@ -661,6 +692,59 @@ def trust(rex, run):
     run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
     run["t0"] = run["trust_at"] = time.time()
     return True
+
+
+def options_on(scr):
+    """The numbered options of a dialog on screen, as [(digit, label)]: what a person can pick with `answer BLOCK N`."""
+    seen = {}
+    for l in scr.splitlines():
+        m = re.match(r"^[^\w\n]{0,6}([1-9])\.\s+(\S.*)$", l.strip("\n"))
+        if m and m.group(1) not in seen:
+            seen[m.group(1)] = oneline(re.sub(r"[\s│|]+$", "", m.group(2)), 60)
+    return sorted(seen.items())
+
+
+def startup_stop(rex, run):
+    """A startup dialog nobody here may answer: the screen goes back to the orchestrator, with the options it offers."""
+    scr = rex.screen(run["block"], 14)
+    return {"state": "blocked", "kind": "startup", "question": scr, "options": options_on(scr)}
+
+
+def codex_startup(rex, run):
+    """Codex shows two dialogs before its first turn and reports neither as status. The folder dialog is confirmed with
+    Enter (its pre-selected option is the right one) if --trust was given and it names this directory. The hooks dialog is a
+    decision: only an explicit --codex-hooks answers it (at most 3 times); otherwise it goes back to a person."""
+    scr = rex.screen(run["block"], 16)
+    low = scr.lower()
+    hooks, folder = low.rfind("hooks need review"), low.rfind("trust this folder")
+    if hooks < 0 and folder < 0:
+        return startup_stop(rex, run)
+    if time.time() - run.get("startup_at", 0) < 10:
+        return None  # we pressed a moment ago; give the dialog time to close instead of pressing again
+    kind = "hooks" if hooks > folder else "folder"  # the one drawn last is the one that is open
+    n = (run.get("startup_n") or {}).get(kind, 0)
+    if n >= 3 or (kind == "folder" and not (run.get("trust") and names_dir(scr, run))):
+        return startup_stop(rex, run)
+    if kind == "hooks":
+        digit = CODEX_HOOKS.get(run.get("codex_hooks"))
+        if not digit:
+            return startup_stop(rex, run)
+        rex.type(run["block"], digit)
+        run.setdefault("approved", []).append(f"codex hooks dialog: {run['codex_hooks']} (key {digit})")
+    else:
+        rex.key(run["block"], "enter")
+        run.setdefault("approved", []).append(f"folder trust: {run['dir']}")
+    run["startup_n"] = {**(run.get("startup_n") or {}), kind: n + 1}
+    run["t0"] = run["startup_at"] = time.time()
+    return True
+
+
+def startup(rex, run):
+    """The dialog before the first turn: None while it is being dealt with, else what to hand back."""
+    if agent_of(run) == "codex":
+        r = codex_startup(rex, run)
+        return None if r is True else r
+    return None if trust(rex, run) else startup_stop(rex, run)
 
 
 def prompt_id(text, rec):
@@ -734,10 +818,14 @@ def tick(rex, run, policy):
         return {"state": "error", "question": rec.get("msg", "")}
     elif state == "blocked":
         kind, text = question(rec)
-        if "trust this folder" in text.lower():  # reported as a permission prompt by newer Claude Code
-            return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
+        if "trust this folder" in text.lower() and agent_of(run) == "claude":  # reported as a permission prompt by newer Claude Code
+            return startup(rex, run)
         run["seen"] = True
         run["wait_since"] = wait_since(run, rec, text)
+        if kind == "permission" and (agent_of(run) != "claude" or rec.get("app", "claude-code") != "claude-code"):
+            # Another agent's dialogs are not known well enough to press keys in, whatever the policy says.
+            return {"state": "blocked", "kind": kind, "prompt": text, "foreign": True,
+                    "question": f"{text}\nthe worker's screen:\n{rex.screen(run['block'], 20)}"}
         if kind == "permission" and not re.match(r"[\w.\-]+: \S", text):
             # A very long command is reported as just `permission prompt`: nothing to match, so never routine.
             # Give the orchestrator the screen, so it can decide without a second call.
@@ -758,12 +846,14 @@ def tick(rex, run, policy):
         return {"state": "blocked", "kind": kind, "prompt": text, "question": text}
     elif state == "none" and age > 15 and not run.get("seen"):
         # Dialogs shown before the agent starts (folder trust) are not reported as `blocked`.
-        return None if trust(rex, run) else {"state": "blocked", "kind": "startup", "question": rex.screen(run["block"], 14)}
+        return startup(rex, run)
     return None
 
 
 def start(rex, a, agent_args):
     check_name(a.name)
+    agent, hooks = getattr(a, "agent", None) or "claude", getattr(a, "codex_hooks", None)
+    check_agent(agent, hooks)
     at_least_one(a.verify_timeout, "--verify-timeout")
     try:  # bytes, not text: a task that is not UTF-8 or has CRLF line ends must arrive as written
         task = getattr(a, "task_bytes", None)  # fanout has read it already
@@ -800,7 +890,7 @@ def start(rex, a, agent_args):
         claim = {"id": f"{int(time.time())}-{a.name}-{os.urandom(3).hex()}", "name": a.name, "dir": a.dir, "real": real,
                  "host": rex.host or "", "session": rex.session, "block": "", "state": "starting", "t0": time.time(),
                  "verify": a.verify, "verify_timeout": a.verify_timeout, "trust": a.trust, "keep": a.keep,  # what 'strays --adopt' needs
-                 "started": time.strftime("%Y-%m-%d %H:%M")}
+                 "agent": agent, "codex_hooks": hooks, "started": time.strftime("%Y-%m-%d %H:%M")}
         ledger_update(claim, locked=True)
     try:
         return launch(rex, a, agent_args, task, claim)
@@ -811,6 +901,7 @@ def start(rex, a, agent_args):
 
 
 def launch(rex, a, agent_args, task, claim):
+    agent = claim["agent"]
     task += REPORT_PROTOCOL.format(report=f".rex-crew/report-{a.name}.md").encode()
     b64, d = base64.b64encode(task).decode(), shlex.quote(a.dir)
     # .rex-crew/ holds task and report; keep it out of git without touching the repo's files.
@@ -818,19 +909,23 @@ def launch(rex, a, agent_args, task, claim):
     step = 30000
     for i in range(0, len(b64), step):
         # a directory a worker used before may hold planted symlinks: never write through them
-        pre = ("if [ -L .rex-crew ]; then echo '@@LINK .rex-crew is a symlink'; exit 1; fi; "
+        pre = (have_agent(agent) + "if [ -L .rex-crew ]; then echo '@@LINK .rex-crew is a symlink'; exit 1; fi; "
                f"mkdir -p .rex-crew && rm -f .rex-crew/report-{a.name}.md .rex-crew/task-{a.name}.b64 .rex-crew/task-{a.name}.md && "
                "x=$(git rev-parse --git-common-dir 2>/dev/null) && { grep -qx '.rex-crew/' \"$x/info/exclude\" 2>/dev/null || [ -L \"$x/info/exclude\" ] || echo '.rex-crew/' >> \"$x/info/exclude\"; }; ") if i == 0 else ""
         post = f" && base64 -d < .rex-crew/task-{a.name}.b64 > .rex-crew/task-{a.name}.md && rm .rex-crew/task-{a.name}.b64" if i + step >= len(b64) else ""
         _, out = rex.sh(f"cd -- {d} || exit 97; {pre}printf %s {b64[i:i + step]} >> .rex-crew/task-{a.name}.b64{post} && echo @@PUT ok")
+        if "@@NOAGENT" in out:
+            die(f"{agent} is not installed on the host (not found on its PATH, which includes ~/.local/bin and /opt/homebrew/bin): nothing was started", EXIT["error"])
         if "@@LINK" in out:
             die(f"{a.dir}/.rex-crew is a symlink (a worker that ran there before may have planted it): nothing was written. Remove it, or use a fresh checkout", USAGE)
         if "@@PUT ok" not in out:
             die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
-    # The prompt goes first: --allowedTools is variadic and would swallow it.
-    line = ("export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:$PATH\"; cd -- " + d
-            + " && exec claude " + shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args))
+    if agent == "codex":  # `codex [OPTIONS] PROMPT`; a variadic option (--image) would swallow the prompt: `--` ends the options
+        words = (" ".join(shlex.quote(x) for x in agent_args) + " -- " if agent_args else "") + shlex.quote(prompt)
+    else:  # The prompt goes first: --allowedTools is variadic and would swallow it.
+        words = shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args)
+    line = (f"export PATH=\"{HOST_PATH}:$PATH\"; cd -- " + d + f" && exec {agent} " + words)
     try:
         rex_out = ""
         p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
@@ -959,10 +1054,13 @@ def answer_lines(run, res):
     pre = "rex-crew" + (f" -S {q(run['host'])}" if run.get("host") else "") + f" -s {q(run['session'])}"
     b, kind, prompt = q(run["block"]), res.get("kind") or "", res.get("prompt") or ""
     if res["state"] == "error" or kind == "startup":
-        return [f"look:    {pre} screen {b}", f"close:   {pre} close {b}"]
+        picks = [f"choose {n}: {pre} answer {b} {n}        ({label})" for n, label in res.get("options") or []] if agent_of(run) == "codex" else []
+        return [f"look:    {pre} screen {b}"] + picks + [f"close:   {pre} close {b}"]
     if kind == "question":
         return [f"answer:  {pre} answer {b} 1        (an option number; {pre} screen {b} shows them)",
                 f"or free text:  {pre} answer {b} {q('your text')} --text"]
+    if kind == "permission" and res.get("foreign"):  # no approve line: this tool never presses keys in another agent's dialog
+        return [f"look:    {pre} screen {b}", f"close:   {pre} close {b}"]
     if kind == "permission":
         # --match makes the copy safe: it presses Yes only if the prompt still open is exactly this one
         match = f" --match {q('^' + re.escape(prompt) + chr(92) + 'Z')}" if prompt and clean(prompt) == prompt and "\n" not in prompt and len(prompt) <= 500 else ""
@@ -979,7 +1077,7 @@ def run_json(run, res, note=None):
     """One worker as a dict for --json: the facts show() prints. What the worker wrote is in fields named worker_*."""
     state, done = res["state"], "git" in res
     approved = run.get("approved") or []
-    return {"name": run["name"], "state": state, "exit": exit_of(state), "seconds": int(time.time() - (run.get("t0") or time.time())),
+    return {"name": run["name"], "agent": agent_of(run), "state": state, "exit": exit_of(state), "seconds": int(time.time() - (run.get("t0") or time.time())),
             "block": run.get("block", ""), "dir": run.get("dir", ""), "host": run.get("host") or "", "session": run.get("session") or "",
             "keep": bool(run.get("keep")), "auto_approved_count": len(approved),
             "worker_auto_approved": [oneline(x, 60) for x in approved[-5:]],
@@ -1153,7 +1251,7 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False, as_json=Fals
 
 def cmd_start(rex, a):
     run = start(rex, a, a.agent_args)
-    print(f"started {run['name']}   block: {run['block']}   dir: {run['dir']}")
+    print(f"started {run['name']}   block: {run['block']}   dir: {run['dir']}" + (f"   agent: {run['agent']}" if run["agent"] != "claude" else ""))
 
 
 def set_thresholds(a):
@@ -1191,7 +1289,7 @@ def cmd_runs(rex, a):
     for r in shown[-a.last:]:
         t0 = r.get("t0")
         if a.json:
-            emit_json({"state": r["state"], "name": r["name"], "started": r.get("started", ""), "host": r["host"], "dir": r["dir"],
+            emit_json({"state": r["state"], "name": r["name"], "agent": agent_of(r), "started": r.get("started", ""), "host": r["host"], "dir": r["dir"],
                        "block": "" if r["state"] in ("done", "closed", "gone") else r["block"], "session": r["session"],
                        "age_seconds": int(max(0, time.time() - t0)) if isinstance(t0, (int, float)) else None})
             continue
@@ -1204,7 +1302,7 @@ def cmd_runs(rex, a):
         elif r["state"] in LIVE and stalled_for(r) >= STALL_AFTER:
             extra = [f"screen unchanged {fmt_age(stalled_for(r))} at the last look"]
         print("\t".join([r["state"], r["name"], r.get("started", ""), r["host"] or "local", r["dir"],
-                         "" if r["state"] in ("done", "closed", "gone") else r["block"], r["session"] or "-", age] + extra))
+                         "" if r["state"] in ("done", "closed", "gone") else r["block"], r["session"] or "-", age, agent_of(r)] + extra))
     if not shown and not a.json and elsewhere(rex):
         print(elsewhere(rex))
 
@@ -1279,7 +1377,7 @@ def cmd_approve(rex, a):
     if a.match and not wanted.search(text):
         die(f"the open prompt does not match: {text}. Read it, then `rex-crew approve` without --match, or `rex-crew deny`", EXIT["blocked"])
     if not approve_once(rex, a.block, text):
-        die("no permission prompt open, or not a Claude Code pane. See `rex-crew status` for what the pane is doing", USAGE)
+        die("no permission prompt open, or the worker is not Claude Code (this tool never presses keys in another agent's dialog). See `rex-crew status` for what the pane is doing", USAGE)
     for r in mine(rex, KEEPS_PANE):
         if r["block"] == a.block:  # a collect right after must not press for this same prompt again
             last, n, at = r.get("press") or ["", 0, 0]
@@ -1289,10 +1387,26 @@ def cmd_approve(rex, a):
     print(f"approved once: {text[:200]}")
 
 
+def answer_startup(rex, a):
+    """A worker that has reported no status yet may sit in a dialog of its agent (Codex's startup dialogs are not reported).
+    Press the option's digit, nothing else, and only for a worker of this session whose screen offers that number."""
+    run = next((r for r in mine(rex, LIVE) if r["block"] == a.block), None)
+    if not run or a.text or not re.fullmatch(r"[1-9]", a.choice):
+        return False
+    if a.choice not in dict(options_on(rex.screen(a.block, 30))):
+        die(f"the screen offers no option {a.choice}: look with `rex-crew screen {a.block}`", USAGE)
+    rex.type(a.block, a.choice)
+    update_runs(rex, a.block, LIVE, state="open", t0=time.time(), wait_since=None, wait=None, startup_at=time.time(), startup_n={})
+    print(f"pressed {a.choice} in the startup dialog of {run['name']}")
+    return True
+
+
 def cmd_answer(rex, a):
     """Answer a worker's question: pick a numbered option, or type free text into its last option."""
     guard(a.block)
     rec = rex.status(a.block)
+    if not rec and answer_startup(rex, a):
+        return
     if rec.get("state") != "blocked" or rec.get("kind") != "question":
         die("no question open (for a permission prompt use approve or deny). See `rex-crew status`", USAGE)
     if re.fullmatch(r"[0-9]+", a.choice) and not a.text:
@@ -1338,12 +1452,15 @@ def cmd_status(rex, a):
         kind, text = question(rec)
         if a.json:
             emit_json({"worker_state": clean(rec["state"]) if "state" in rec else None, "worker_label": clean(b["label"]) if "label" in b else None,
-                       "block": clean(b["block_id"]), "worker_kind": clean(kind), "worker_question": clean(text)})
+                       "block": clean(b["block_id"]), "worker_kind": clean(kind), "worker_question": clean(text),
+                       "worker_app": clean(rec["app"]) if "app" in rec else None, "agent": agent_of(entries[b["block_id"]]) if b["block_id"] in entries else None})
             continue
         full = oneline(kind + " " + text, 10 ** 9)
         shown = full if len(full) <= 100 else full[:90] + f"... (+{len(full) - 90} more chars: status {oneline(b['block_id'], 60)})"
         row = [oneline(rec.get("state", "-"), 30), oneline(b.get("label", "-"), 60), oneline(b["block_id"], 60), shown]
         now, e = time.time(), entries.get(b["block_id"])
+        if rec.get("app") or e:
+            row.append("app " + oneline(rec.get("app") or agent_of(e), 30))
         if rec.get("state") == "blocked":
             t = reported_at(rec, now)
             t = t if t is not None else (e or {}).get("wait_since")
@@ -1406,7 +1523,8 @@ def cmd_session(rex, a):
 
 # ---- fanout and integrate ----------------------------------------------------------------------------
 
-PLAN_KEYS = {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", "trust", "preamble", "workers"}
+PLAN_KEYS = {"repo", "base", "copy", "agent", "agent_args", "claude_args", "codex_hooks", "verify", "verify_timeout", "trust", "preamble", "workers"}
+WORKER_KEYS = ("name", "task", "task_file", "agent", "agent_args")
 
 def load_plan(path):
     """The plan, checked completely before anything is created: a typo must not become half a fan-out."""
@@ -1434,8 +1552,17 @@ def load_plan(path):
     copy = p.setdefault("copy", [])
     if not strs(copy) or any(not c or c.startswith("/") or ".." in c.split("/") or "\n" in c for c in copy):
         bad('"copy" must be a list of paths inside the repository (no absolute path, no "..")')
-    if not strs(p.setdefault("claude_args", [])):
-        bad('"claude_args" must be a list of strings, one per argument')
+    if "claude_args" in p and "agent_args" in p:
+        bad('"claude_args" and "agent_args" are the same thing (agent_args is the neutral name): give only one')
+    if p.setdefault("agent", "claude") not in AGENTS:
+        bad(f"unknown agent {str(p['agent'])[:40]!r}: use one of {', '.join(AGENTS)}")
+    if "claude_args" in p and p["agent"] != "claude":
+        bad('"claude_args" are for claude: use "agent_args" for a plan whose agent is ' + p["agent"])
+    p["agent_args"] = p.pop("claude_args") if "claude_args" in p else p.get("agent_args", [])
+    if not strs(p["agent_args"]):
+        bad('"agent_args" (or "claude_args") must be a list of strings, one per argument')
+    if p.setdefault("codex_hooks", None) not in (None, *CODEX_HOOKS):
+        bad('"codex_hooks" must be "skip" or "trust" (or left out: a person decides)')
     if p.setdefault("verify", None) is not None and not (isinstance(p["verify"], str) and p["verify"].strip()):
         bad('"verify" must be a shell command (a non-empty string); leave it out for no check')
     vt = p.setdefault("verify_timeout", 600)
@@ -1461,9 +1588,16 @@ def load_plan(path):
             who = w.get("name") if isinstance(w, dict) else w
             bad(f"worker {who!r}: NAME must be lowercase a-z0-9_- and at most 32 characters")
         n = w["name"]
-        if set(w) - {"name", "task", "task_file"}:
-            extra = sorted(set(w) - set(("name", "task", "task_file")))[0]
+        if set(w) - set(WORKER_KEYS):
+            extra = sorted(set(w) - set(WORKER_KEYS))[0]
             bad(f"worker {n}: unknown key {extra!r}")
+        if w.setdefault("agent", p["agent"]) not in AGENTS:
+            bad(f"worker {n}: unknown agent {str(w['agent'])[:40]!r}: use one of {', '.join(AGENTS)}")
+        if "agent_args" in w:
+            if not strs(w["agent_args"]):
+                bad(f'worker {n}: "agent_args" must be a list of strings, one per argument')
+        else:  # the plan's arguments are for the plan's agent: another kind of worker would not understand them
+            w["agent_args"] = p["agent_args"] if w["agent"] == p["agent"] else []
         if n in seen:
             bad(f"name {n} appears twice")
         seen.add(n)
@@ -1517,6 +1651,8 @@ def cmd_fanout(rex, a):
     check = "".join(f"wt=\"$(dirname \"$r\")/.rex-crew-worktrees/$(basename \"$r\")/{n}\"; "
                     f"[ -e \"$wt\" ] && echo \"{m}ERR the checkout $wt already exists\"; "
                     f"git show-ref --verify -q refs/heads/crew/{n} && echo \"{m}ERR the branch crew/{n} already exists\"; " for n in names)
+    check += "".join(f"( export PATH=\"{HOST_PATH}:$PATH\"; command -v {x} >/dev/null 2>&1 ) || "
+                     f"echo \"{m}ERR {x} is not installed on the host (a worker of the plan uses it)\"; " for x in sorted({w["agent"] for w in plan["workers"]}))
     check += "".join(f"[ -e \"$r\"/{shlex.quote(c)} ] || echo \"{m}ERR the copy path {c} does not exist in the repository\"; " for c in plan["copy"])
     errs = preflight(rex, f"r=$(cd -- {shlex.quote(repo)} && pwd) || exit 97; cd -- \"$r\"; export LC_ALL=C; "
                           f"git rev-parse --git-dir >/dev/null 2>&1 || {{ echo {m}ERR {shlex.quote(repo)} is not a git repository; exit 1; }}; "
@@ -1532,8 +1668,9 @@ def cmd_fanout(rex, a):
             inflight = None
         for w, (path, _) in zip(plan["workers"], made):
             ns = argparse.Namespace(name=w["name"], dir=path, task=None, task_bytes=w["body"], verify=plan["verify"],
-                                    verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False, preamble_bytes=pre)
-            runs.append(start(rex, ns, plan["claude_args"]))
+                                    verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False, preamble_bytes=pre,
+                                    agent=w["agent"], codex_hooks=plan["codex_hooks"] if w["agent"] == "codex" else None)
+            runs.append(start(rex, ns, w["agent_args"]))
     except BaseException as e:  # die() raises SystemExit; Ctrl-C too: leave nothing behind
         fanout_undo(rex, repo, made, runs, inflight)
         if not isinstance(e, KeyboardInterrupt):
@@ -1731,11 +1868,14 @@ def main():
         q.add_argument("--verify-timeout", type=int, default=600, help="seconds the verify command may run before it is killed (default 600)")
         q.add_argument("--keep", action="store_true", help="leave the worker's pane open after it finishes")
         q.add_argument("--preamble", metavar="FILE", help="standing instructions appended to the task (before the report protocol)")
+        q.add_argument("--agent", choices=AGENTS, default="claude", help="which agent the worker is: claude (Claude Code, default) or codex (Codex CLI)")
+        q.add_argument("--codex-hooks", choices=sorted(CODEX_HOOKS), metavar="skip|trust", help="answer Codex's 'Hooks need review' dialog in advance: "
+                       "skip = continue without trusting (key 3), trust = trust all (key 2); default: hand it back to a person")
 
     policy_help = "JSON policy file: {approve: [regex], never: [regex]}; without it nothing is answered for you"
     brief_help = "per worker only: header, ATTENTION, git, verify, the report's CHANGED and OPEN (capped); then a one-line tally"
     json_help = "one JSON object per line and per worker instead of text (same facts; the worker's own words are in fields named worker_*); exit codes unchanged"
-    claude_args = "usage: rex-crew run NAME DIR TASK [options] -- CLAUDE_ARGS\neverything after a bare -- goes to claude, e.g. -- --permission-mode acceptEdits"
+    claude_args = "usage: rex-crew run NAME DIR TASK [options] -- AGENT_ARGS\neverything after a bare -- goes to the agent that is started (claude or codex), e.g. -- --permission-mode acceptEdits"
     r = sub.add_parser("run", help="one task, start to report: `start` then `collect` for it", epilog=claude_args, formatter_class=raw)
     task_args(r); r.add_argument("--policy", help=policy_help)
     r.add_argument("--timeout", type=int, default=900, help="seconds to wait (default 900); then exit 3, and `collect` waits again")
@@ -1785,7 +1925,7 @@ def main():
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)
 
     fo = sub.add_parser("fanout", help="one checkout and one worker per entry of a plan file; all or nothing")
-    fo.add_argument("plan", help='JSON: {"repo", "base", "copy", "claude_args", "verify", "verify_timeout", "trust", "workers": [{"name", "task_file" or "task"}]}')
+    fo.add_argument("plan", help='JSON: {"repo", "base", "copy", "agent", "agent_args" (or "claude_args"), "codex_hooks", "verify", "verify_timeout", "trust", "workers": [{"name", "task_file" or "task", "agent", "agent_args"}]}')
     fo.add_argument("--preamble", metavar="FILE", help='standing instructions appended to every task (or the plan key "preamble"; this option wins)')
     fo.set_defaults(fn=cmd_fanout)
     ig = sub.add_parser("integrate", help="merge the workers' branches (crew/NAME) into REPO's current branch, one at a time")

@@ -23,6 +23,10 @@ class Base(unittest.TestCase):
         t = self.tmp.name
         os.makedirs(f"{t}/bin")
         os.symlink(FAKE, f"{t}/bin/rex")
+        for agent in ("claude", "codex"):  # the host's agents: start refuses an agent that is not installed
+            with open(f"{t}/bin/{agent}", "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(f"{t}/bin/{agent}", 0o755)
         self.fake_state, self.ledger = f"{t}/fake.json", f"{t}/runs.json"
         env = {"PATH": f"{t}/bin:" + os.environ["PATH"], "FAKE_REX_STATE": self.fake_state,
                "REX_CREW_STATE": self.ledger, "REX_CREW_SESSION": "s1"}
