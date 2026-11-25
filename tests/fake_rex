@@ -9,11 +9,12 @@ State layout:
    "blocks": {ID: {"label", "output", "script", "closed", "session", "typed"}},
    "screens": {LABEL: text},            # what capture shows for a block started with --label LABEL
    "procs": {LABEL: process},           # what `block call process` returns for it (default: claude in front)
+   A block whose last status was a blocked permission prompt shows Claude Code's Yes/Yes-always/No dialog unless its screen has options.
 Text sent to a block shows under "❯ " in its capture until Enter, like an agent's input box (FAKE_REX_NO_ECHO=1: never).
    "sent": [{"block", "kind": "text"|"key", "value"}]}
 `run --wait -- sh -c CMD` really runs CMD locally; its output is what `capture` returns for that block.
 """
-import fcntl, json, os, subprocess, sys
+import fcntl, json, os, re, subprocess, sys
 
 PATH = os.environ["FAKE_REX_STATE"]
 
@@ -119,6 +120,7 @@ def dispatch(argv):
             if blk["script"] and blk["script"][0] == "GONE":
                 blk["closed"] = True; save(st); fail("no such block")
             rec = blk["script"][0] if blk["script"] else None
+            blk["last"] = rec
             if len(blk["script"]) > 1:
                 blk["script"].pop(0)
             save(st)
@@ -136,6 +138,9 @@ def dispatch(argv):
         o, _ = opts(argv[1:], {"-s", "-b"})
         blk = live(st, o["-b"])
         out = blk["output"]
+        last = blk.get("last") or {}
+        if last.get("state") == "blocked" and last.get("kind") == "permission" and not re.search(r"(?m)^\W{0,6}[1-9]\.\s", out):
+            out += "\n❯ 1. Yes\n  2. Yes, and don't ask again for this command\n  3. No\n"  # Claude Code's permission dialog
         if blk.get("typed") and not os.environ.get("FAKE_REX_NO_ECHO"):
             box = out.rfind("\n❯ \n")  # a drawn input box (between two rules) takes the text, as a real agent's does
             out = (out[:box] + "\n❯ " + blk["typed"] + out[box + 2:] if box >= 0 else

@@ -158,5 +158,32 @@ class Guards(Base):
         self.assertIn("no session", err)
 
 
+    # -- a worker named instead of its pane (25.11.2026: `send w-144-rest ...` was refused after fanout) ---------------
+    def test_send_and_approve_take_the_workers_name(self):
+        b = self.started(rec("idle"), name="w-144-rest")
+        code, out, err = self.cli("send", "w-144-rest", "weiter")
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.keys(b), ["weiter", "enter"])
+        code, out, err = self.cli("send", "w-unknown", "weiter")
+        self.assertEqual(code, 6, out + err)
+
+    # -- approve presses the one-time Yes, wherever the dialog puts it (24.11.2026) ----------------------------------
+    READ_OUTSIDE = ("Read file\n❯ 1. Yes, and keep allowing any reads outside the working directories\n"
+                    "  2. Yes, allow reading from Downloads/ during this session\n  3. No\n  4. Yes, but ask again next time\n")
+
+    def test_approve_picks_the_one_time_yes_not_option_1(self):
+        b = self.started(rec("blocked", "permission", "approve Read: /tmp/x"), screen=self.READ_OUTSIDE)
+        code, out, err = self.cli("approve", b)
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(self.keys(b), ["4"])
+
+    def test_approve_presses_nothing_when_only_lasting_yes_is_offered(self):
+        b = self.started(rec("blocked", "permission", "approve Read: /tmp/x"),
+                         screen="❯ 1. Yes, and keep allowing reads\n  2. No\n")
+        code, out, err = self.cli("approve", b)
+        self.assertNotEqual(code, 0, out + err)
+        self.assertEqual(self.keys(b), [])
+
+
 if __name__ == "__main__":
     unittest.main()

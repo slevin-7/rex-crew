@@ -756,8 +756,22 @@ def approve_once(rex, block, expect):
         return False  # other agents' dialogs are not known well enough to press keys in
     if stopped() or agent_in_front(rex, block, rec)[0] is False:
         return False  # stopped, or the record outlived its agent: the 1 would land in a shell
-    rex.type(block, "1")
+    pick = once_option(rex.screen(block, 30))
+    if not pick:
+        return False  # no one-time Yes on screen (only lasting ones): a person decides
+    rex.type(block, pick)
     return True
+
+
+def once_option(scr):
+    """The digit of the dialog's one-time Yes. Claude Code's first option is not always it: for a read outside the working
+    directories (24.11.2026) 1 is "Yes, and keep allowing any reads outside the working directories" and the one-time
+    choice is "Yes, but ask again next time". None when only lasting Yes options are offered."""
+    for digit, label in options_on(scr):
+        l = label.lower().rstrip(" .…")
+        if l == "yes" or (l.startswith("yes") and "ask again next time" in l and "don't" not in l and "do not" not in l):
+            return digit
+    return None
 
 
 # ---- one worker --------------------------------------------------------------------------------------
@@ -2056,6 +2070,16 @@ def cmd_integrate(rex, a):
     sys.exit(1 if empty else 0)
 
 
+def block_of_name(rex, target):
+    """A worker may be named instead of its pane id (`send w1 ...`, as `collect w1` takes it): the pane of this session's
+    newest run of that name. Anything else, a pane id among them, stays as given."""
+    runs = mine(rex, None)
+    if any(r["block"] == target for r in runs):
+        return target
+    named = [r for r in runs if r["name"] == target and r["block"]]
+    return named[-1]["block"] if named else target
+
+
 def own_session():
     """The session of the Rex pane this runs in. Rex servers from preview.23 on set only REX_BLOCK in new terminals, no
     REX_SESSION; `rex whoami` names the session that holds REX_BLOCK. None outside a Rex pane or when rex cannot say."""
@@ -2163,7 +2187,7 @@ def main():
     sh.add_argument("command", nargs="+", help="shell words, run as one command line"); sh.set_defaults(fn=cmd_sh)
     se = sub.add_parser("send", help="send a message; refused unless the worker is at its prompt")
     se.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)")
-    se.add_argument("block", help="the worker's pane id"); se.add_argument("text", nargs="+", help="the message"); se.set_defaults(fn=cmd_send)
+    se.add_argument("block", help="the worker's pane id or name"); se.add_argument("text", nargs="+", help="the message"); se.set_defaults(fn=cmd_send)
     ap = sub.add_parser("approve", help="one-time Yes to the open permission prompt")
     ap.add_argument("block"); ap.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)"); ap.add_argument("--match", help="approve only if the open prompt matches this regex (else exit 2: it needs you)"); ap.set_defaults(fn=cmd_approve)
     an = sub.add_parser("answer", help="answer a worker's question: an option number, or free text")
@@ -2210,7 +2234,10 @@ def main():
     session = a.session or (None if a.host else os.environ.get("REX_SESSION") or own_session())
     if not session and a.cmd not in ("session", "runs"):
         die("no session: pass -s, set REX_CREW_SESSION, or run `rex-crew -S HOST session LABEL`", USAGE)
-    a.fn(Rex(a.host, session), a)
+    rex = Rex(a.host, session)
+    if getattr(a, "block", None):
+        a.block = block_of_name(rex, a.block)
+    a.fn(rex, a)
 
 
 if __name__ == "__main__":

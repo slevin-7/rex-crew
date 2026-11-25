@@ -169,9 +169,10 @@ commands (`filter.lfs.*` is not reported): look at `git config --local --list`. 
 ## When a worker needs you
 
 ```sh
-"$here/rex-crew" approve BLOCK --match 'make deploy'   # one-time Yes, only if the prompt still matches; always give --match, the worker may have moved on
+"$here/rex-crew" approve BLOCK --match 'make deploy'   # the one-time Yes on screen (never a lasting one; none offered: a person decides), only if the prompt still matches; always give --match, the worker may have moved on
 "$here/rex-crew" deny BLOCK                                  # Escape; then `send` what to do instead
 "$here/rex-crew" send BLOCK "Use the staging database."      # only when the worker is at its prompt
+# BLOCK may also be the worker's name (newest run of this session), for send, approve, answer, deny, screen, status and close
 "$here/rex-crew" collect --policy policy.json               # then wait again: verify and report as before
 ```
 
