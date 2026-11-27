@@ -17,6 +17,7 @@ Text sent to a block shows under "❯ " in its capture until Enter, like an agen
 import fcntl, json, os, re, subprocess, sys
 
 PATH = os.environ["FAKE_REX_STATE"]
+LOCK = None  # main() holds the host's lock here; tests that call dispatch() directly have none
 
 
 def load():
@@ -70,7 +71,8 @@ def hang_wanted(argv):
 
 
 def main():
-    lock = open(PATH + ".lock", "a")  # concurrent rex-crew processes share one fake host
+    global LOCK
+    lock = LOCK = open(PATH + ".lock", "a")  # concurrent rex-crew processes share one fake host
     fcntl.flock(lock, fcntl.LOCK_EX)
     argv = sys.argv[1:]
     if argv[:1] == ["-S"]:
@@ -100,8 +102,14 @@ def dispatch(argv):
                "script": list(st["scripts"].get(o.get("--label", ""), [])), "prog": prog}
         st["blocks"][bid] = blk
         rc = 0
-        if "--wait" in o:
+        if "--wait" in o:  # the command may call rex itself (doctor does): let go of the host while it runs
+            save(st)
+            if LOCK:
+                fcntl.flock(LOCK, fcntl.LOCK_UN)
             p = subprocess.run(prog, capture_output=True, text=True)
+            if LOCK:
+                fcntl.flock(LOCK, fcntl.LOCK_EX)
+            st = load(); blk = st["blocks"][bid]
             blk["output"], rc = p.stdout + p.stderr, p.returncode
         save(st)
         print(json.dumps({"block_ids": [bid]}))
@@ -114,6 +122,9 @@ def dispatch(argv):
             if pos == ["process"]:
                 print(json.dumps(st.get("procs", {}).get(blk["label"]) or
                                  {"child": {"pid": 1, "name": "login"}, "foreground": {"pid": 4242, "name": "claude"}, "last_exit": None}))
+                return
+            if pos == ["program_resume_records"]:  # "resume": {LABEL: [record, ...]}
+                print(json.dumps({"records": st.get("resume", {}).get(blk["label"], [])}))
                 return
             if pos != ["program_status"]:
                 fail("unsupported block call")
@@ -163,6 +174,8 @@ def dispatch(argv):
         print(json.dumps({"session_id": sid, "block_id": os.environ.get("REX_BLOCK")} if sid else {"session_count": 0}))
     elif cmd == "ls":
         print(json.dumps({"sessions": st["sessions"]}))
+    elif argv[:2] == ["config", "check"]:  # "config_check": the text `rex config check` prints
+        print(st.get("config_check", ""), end="")
     elif cmd == "new":
         sid = f"s{len(st['sessions']) + 1}"
         st["sessions"].append({"session_id": sid, "label": argv[1]}); save(st)

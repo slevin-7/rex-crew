@@ -1731,6 +1731,65 @@ def cmd_status(rex, a):
             print(data(text, "    "))
 
 
+# What doctor asks the host, in one throwaway tab: the agents, Rex's Claude Code hook, the resume rules in force.
+DOCTOR_SH = (f'export PATH="{HOST_PATH}:$PATH"; '
+             'for a in claude codex; do v=-; command -v "$a" >/dev/null 2>&1 && v=$("$a" --version 2>/dev/null | head -1); echo "@@AGENT $a ${v:--}"; done; '
+             'grep -qs "rex __internal session-start" "$HOME/.claude/settings.json" "$HOME/.claude/settings.local.json" && echo "@@HOOK yes" || echo "@@HOOK no"; '
+             "rex config check 2>&1 | sed -n '/^resume rules/,$p' | sed 's/^/@@RULES /'")
+
+
+def cmd_doctor(rex, a):
+    """Is the host ready for workers, and which live workers come back after a Rex server restart? Exit 1 if anything is not."""
+    _, out = rex.sh(DOCTOR_SH)
+    lines = [l for l in out.splitlines() if l.startswith("@@")]
+    rows = []  # (level, text); level ok | note | warn | FAIL
+    for l in lines:
+        if l.startswith("@@AGENT "):
+            name, _, ver = l[8:].partition(" ")
+            if ver.strip() not in ("", "-"):
+                rows.append(("ok", f"{name} on the host: {oneline(ver, 60)}"))
+            elif name == "claude":
+                rows.append(("FAIL", "claude is not on the host's PATH (~/.local/bin and /opt/homebrew/bin included): no worker can start"))
+            else:
+                rows.append(("note", f"{name} is not on the host (only needed for --agent {name})"))
+    if "@@HOOK yes" in lines:
+        rows.append(("ok", "Rex's Claude Code hook is installed: a worker tells Rex how to start it again"))
+    else:
+        rows.append(("FAIL", "Rex's Claude Code hook is missing on the host: after a Rex server restart a worker's pane comes back as a "
+                             "plain shell. Fix: `rex skill setup` on the host"))
+    rules = [l[8:] for l in lines if l.startswith("@@RULES ")]
+    in_force = rules[:next((i for i, l in enumerate(rules) if l.strip() == "not in force:"), len(rules))]
+    at = next((i for i, l in enumerate(in_force) if re.match(r"\s+claude \(", l)), None)
+    if at is None:
+        rows.append(("FAIL", "no Rex resume rule for claude is in force on the host (see `rex config check` there): workers do not come back after a restart"))
+    else:
+        where = next((l.strip() for l in in_force[at + 1:at + 4] if l.strip().startswith("dir:")), "")
+        rows.append(("ok", "Rex resume rule for claude is in force" + (f" ({oneline(where, 80)}: workers elsewhere do not come back)" if where else "")))
+    for r in mine(rex, LIVE):
+        who = f"worker {r['name']} ({r['block']})"
+        if agent_of(r) == "codex":
+            rows.append(("note", f"{who}: Codex does not come back after a Rex restart (it reports no resume command yet)"))
+            continue
+        p = rex.call("block", "call", "-s", rex.session, "-b", r["block"], "program_resume_records", check=False)
+        try:
+            recs = [x for x in jload(p.stdout).get("records") or [] if isinstance(x, dict)]
+        except (ValueError, AttributeError):
+            recs = None
+        pick = next((x for x in recs or [] if x.get("chosen")), (recs or [None])[0])
+        if recs is None:
+            rows.append(("warn", f"{who}: Rex would not say whether it comes back after a restart"))
+        elif not pick:
+            rows.append(("warn", f"{who}: has not told Rex how to start it again: after a restart its pane is a plain shell"))
+        elif pick.get("trusted"):
+            rows.append(("ok", f"{who}: comes back after a Rex restart, in the same conversation"))
+        else:
+            rows.append(("warn", f"{who}: does not come back after a Rex restart ({oneline(str(pick.get('untrusted_reason', 'not trusted')), 40)}; "
+                                 "see Rex's Resume Rules)"))
+    for level, text in rows:
+        print(f"{level:<5} {text}")
+    sys.exit(0 if all(level in ("ok", "note") for level, _ in rows) else EXIT["unclean"])
+
+
 def cmd_close(rex, a):
     guard(a.block)
     owned(rex, a.block, a.force, "close")
@@ -2212,6 +2271,8 @@ def main():
     sg.add_argument("--adopt", action="store_true", help="record panes that a recent start claimed as open workers"); sg.add_argument("--close", action="store_true", help="close panes that a recent start claimed")
     sy.set_defaults(fn=cmd_strays)
     cl = sub.add_parser("close", help="close a worker's pane"); cl.add_argument("block"); cl.add_argument("--force", action="store_true", help="act on a pane rex-crew did not start (only one the user named explicitly)"); cl.set_defaults(fn=cmd_close)
+    dr = sub.add_parser("doctor", help="is the host ready (agents, Rex's Claude Code hook, resume rule), and which live workers come back after a Rex restart; exit 1 if anything is not")
+    dr.set_defaults(fn=cmd_doctor)
     ss = sub.add_parser("session", help="print the id of the session with this label, creating it if needed")
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)
 

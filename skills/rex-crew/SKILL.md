@@ -236,6 +236,9 @@ exit 1, so read the lines above a worker's summary first.
 | `close BLOCK` | Close a worker's pane. `run` closes it itself unless `--keep`. |
 | `watch [--interval SECS]` | In the background: a message into your Claude Code conversation whenever a worker finishes or waits (see above). |
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
+| `doctor` | Is the host ready: claude (and codex) on its PATH, Rex's Claude Code hook installed, Rex's resume rule for claude in force. Then, per live worker, whether it comes back after a Rex server restart (and why not). Exit 1 if anything is not. Run it once per new host. |
+
+After a Rex server restart, a Claude Code worker comes back in its pane, in the same conversation, with the flags Rex's rule keeps (Rex's own hook reports it; nothing in rex-crew does). The task prompt is not sent again. Codex workers come back as a plain shell. Not checked yet: whether the pane keeps its block id, which the ledger relies on; after a restart, `status --all` and `strays` show what is there.
 
 ## Method: what real runs taught
 

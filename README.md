@@ -63,6 +63,8 @@ git clone https://github.com/slevin-7/rex-crew ~/src/rex-crew
 ```
 
 Nothing is copied; `install.sh --uninstall` removes the two links. Agents then find the skill as `rex-crew`.
+On each new host, run `rex-crew -S HOST -s SESSION doctor` once: it checks the agents, Rex's Claude Code hook and
+Rex's resume rule, and says which live workers come back after a Rex server restart.
 
 ## Use
 
