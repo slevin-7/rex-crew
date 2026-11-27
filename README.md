@@ -1,5 +1,7 @@
 # rex-crew
 
+![rex-crew: a planner pane sends tasks to worker panes in Rex and gets their reports back](docs/banner.svg)
+
 Plan on one machine, build on another. `rex-crew` lets a coding agent (or you) hand tasks to Claude Code or Codex
 workers running in [Rex](https://www.superlogical.com/rex) panes, on this machine or on any Rex host, and get
 back a short, checkable result instead of a screen to read.

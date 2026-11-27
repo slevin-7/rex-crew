@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="440" viewBox="0 0 1200 440" role="img" aria-label="rex-crew: one planner pane sends tasks to worker panes in Rex and gets their reports back">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1117"/>
+      <stop offset="1" stop-color="#161b2e"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.35" r="0.6">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#8b93a7"/>
+    </marker>
+    <style>
+      .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+      .sans { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+      .pane { fill: #0b0e14; stroke: #2a3142; stroke-width: 1.5; }
+      .bar  { fill: #1a2030; }
+      .dim  { fill: #6b7489; }
+      .txt  { fill: #c9d1e0; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="440" rx="18" fill="url(#bg)"/>
+  <rect width="1200" height="440" rx="18" fill="url(#glow)"/>
+
+  <!-- title -->
+  <text x="64" y="150" class="mono" font-size="64" font-weight="700" fill="#ffffff">rex<tspan fill="#7c5cff">-</tspan>crew</text>
+  <text x="66" y="200" class="sans" font-size="24" fill="#c9d1e0">Plan on one machine. Build on another.</text>
+  <text x="66" y="244" class="sans" font-size="17" fill="#8b93a7">Claude Code and Codex workers in Rex panes,</text>
+  <text x="66" y="268" class="sans" font-size="17" fill="#8b93a7">routine prompts answered by policy, a checkable report back.</text>
+  <g class="mono" font-size="14">
+    <rect x="66" y="306" width="150" height="34" rx="17" fill="#1a2030" stroke="#2a3142"/>
+    <text x="141" y="328" text-anchor="middle" fill="#c9d1e0">run · collect</text>
+    <rect x="226" y="306" width="118" height="34" rx="17" fill="#1a2030" stroke="#2a3142"/>
+    <text x="285" y="328" text-anchor="middle" fill="#c9d1e0">fanout</text>
+    <rect x="354" y="306" width="118" height="34" rx="17" fill="#1a2030" stroke="#2a3142"/>
+    <text x="413" y="328" text-anchor="middle" fill="#c9d1e0">doctor</text>
+  </g>
+
+  <!-- planner pane -->
+  <g transform="translate(600,70)">
+    <rect class="pane" width="230" height="300" rx="10"/>
+    <path class="bar" d="M0 10 a10 10 0 0 1 10 -10 h210 a10 10 0 0 1 10 10 v20 h-230 z"/>
+    <circle cx="16" cy="15" r="4.5" fill="#ff5f57"/><circle cx="30" cy="15" r="4.5" fill="#febc2e"/><circle cx="44" cy="15" r="4.5" fill="#28c840"/>
+    <text x="115" y="20" text-anchor="middle" class="mono dim" font-size="12">planner</text>
+    <g class="mono" font-size="12.5">
+      <text x="14" y="58" class="dim">$ rex-crew fanout</text>
+      <text x="14" y="78" class="txt">  plan.json</text>
+      <text x="14" y="108" class="dim">== api</text>
+      <text x="14" y="126" fill="#28c840">   done · verify 0</text>
+      <text x="14" y="150" class="dim">== ui</text>
+      <text x="14" y="168" fill="#febc2e">   needs you</text>
+      <text x="14" y="192" class="dim">== docs</text>
+      <text x="14" y="210" fill="#7aa2ff">   working</text>
+      <text x="14" y="246" class="dim">auto-approved (3)</text>
+      <text x="14" y="264" class="dim">git: 4be2c1a · dirty 0</text>
+      <rect x="14" y="276" width="8" height="14" fill="#c9d1e0"/>
+    </g>
+  </g>
+
+  <!-- arrows -->
+  <g stroke="#8b93a7" stroke-width="1.6" fill="none" stroke-dasharray="5 5">
+    <path d="M832 130 C 870 130, 880 105, 912 105" marker-end="url(#arrow)"/>
+    <path d="M832 220 C 870 220, 880 220, 912 220" marker-end="url(#arrow)"/>
+    <path d="M832 310 C 870 310, 880 335, 912 335" marker-end="url(#arrow)"/>
+  </g>
+
+  <!-- worker panes -->
+  <g class="mono">
+    <g transform="translate(916,48)">
+      <rect class="pane" width="236" height="104" rx="10"/>
+      <text x="14" y="26" class="txt" font-size="14" font-weight="700">api</text>
+      <rect x="150" y="10" width="72" height="24" rx="12" fill="#12301c" stroke="#28c840"/>
+      <text x="186" y="27" text-anchor="middle" font-size="12" fill="#28c840">done</text>
+      <text x="14" y="58" class="dim" font-size="12">STATUS: done</text>
+      <text x="14" y="78" class="dim" font-size="12">CHANGED: retry on 429</text>
+    </g>
+    <g transform="translate(916,168)">
+      <rect class="pane" width="236" height="104" rx="10" stroke="#febc2e"/>
+      <text x="14" y="26" class="txt" font-size="14" font-weight="700">ui</text>
+      <rect x="132" y="10" width="90" height="24" rx="12" fill="#33290d" stroke="#febc2e"/>
+      <text x="177" y="27" text-anchor="middle" font-size="12" fill="#febc2e">needs you</text>
+      <text x="14" y="58" class="dim" font-size="12">Bash: rm -rf build/</text>
+      <text x="14" y="78" class="txt" font-size="12">1. Yes   2. No</text>
+    </g>
+    <g transform="translate(916,288)">
+      <rect class="pane" width="236" height="104" rx="10"/>
+      <text x="14" y="26" class="txt" font-size="14" font-weight="700">docs</text>
+      <rect x="140" y="10" width="82" height="24" rx="12" fill="#14213d" stroke="#7aa2ff"/>
+      <text x="181" y="27" text-anchor="middle" font-size="12" fill="#7aa2ff">working</text>
+      <text x="14" y="58" class="dim" font-size="12">editing README.md</text>
+      <text x="14" y="78" class="dim" font-size="12">codex · buildbox</text>
+    </g>
+  </g>
+</svg>
