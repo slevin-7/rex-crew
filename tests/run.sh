@@ -8,6 +8,6 @@ ls tests/test_*.py | xargs -P "${REX_CREW_JOBS:-8}" -I{} sh -c 'python3 -m unitt
 bad=0; total=0
 for f in tests/test_*.py; do
   b=$(basename "$f"); n=$(sed -n 's/^Ran \([0-9]*\) tests.*/\1/p' "$out/$b.log" | tail -1); total=$((total + ${n:-0}))
-  if [ "$(cat "$out/$b.rc" 2>/dev/null)" != 0 ]; then bad=$((bad + 1)); echo "FAILED $f"; grep -E "^(FAIL|ERROR):" "$out/$b.log" | head -20; tail -5 "$out/$b.log"; fi
+  if [ "$(cat "$out/$b.rc" 2>/dev/null)" != 0 ]; then bad=$((bad + 1)); echo "FAILED $f"; sed -n '/^\(FAIL\|ERROR\):/,/^Ran /p' "$out/$b.log" | head -80; tail -3 "$out/$b.log"; fi
 done
 [ "$bad" = 0 ] && echo "OK: $total tests in $(ls tests/test_*.py | wc -l | tr -d ' ') files" || { echo "$bad file(s) failed, $total tests ran"; exit 1; }
