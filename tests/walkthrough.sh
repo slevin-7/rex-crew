@@ -8,6 +8,8 @@ trap 'rm -rf "$tmp"' EXIT
 export REX_CREW_STATE="$tmp/runs.json"
 # fake host: a rex on PATH that is tests/fake_rex, with one scripted status sequence per worker label
 mkdir "$tmp/bin" && ln -s "$root/tests/fake_rex" "$tmp/bin/rex"
+# the host's agents: start refuses one that is not installed (a CI runner has none)
+for a in claude codex; do printf '#!/bin/sh\nexit 0\n' > "$tmp/bin/$a" && chmod +x "$tmp/bin/$a"; done
 export PATH="$tmp/bin:$PATH" FAKE_REX_STATE="$tmp/fake.json"
 unset REX_BLOCK REX_CREW_HOST REX_SESSION
 python3 - "$FAKE_REX_STATE" <<'PY'
