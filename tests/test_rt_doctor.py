@@ -57,6 +57,12 @@ class TestDoctor(Base):
         self.assertIn("FAIL  no Rex resume rule for claude", out)  # "claude" under "not in force" does not count
         self.assertIn("does not come back after a Rex restart (flag_not_listed", out)
 
+    def test_rex_without_resume_rules_is_named_as_too_old(self):
+        self.host(rules="path: x\nbindings: 0\n")
+        code, out, _ = self.cli("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("older than 0.1.0-preview.25", out)
+
     def test_worker_without_a_record_and_codex_worker(self):
         self.script("w1", rec("working")); self.script("w2", rec("working"))
         self.cli("start", "w1", self.workdir("a"), self.task)

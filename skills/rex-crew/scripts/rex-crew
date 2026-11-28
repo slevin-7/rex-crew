@@ -1819,7 +1819,10 @@ def cmd_doctor(rex, a):
     rules = [l[8:] for l in lines if l.startswith("@@RULES ")]
     in_force = rules[:next((i for i, l in enumerate(rules) if l.strip() == "not in force:"), len(rules))]
     at = next((i for i, l in enumerate(in_force) if re.match(r"\s+claude \(", l)), None)
-    if at is None:
+    if not rules:
+        rows.append(("FAIL", "Rex on the host lists no resume rules: it is older than 0.1.0-preview.25, which brought program resume. "
+                             "Workers do not come back after a Rex server restart until Rex there is updated"))
+    elif at is None:
         rows.append(("FAIL", "no Rex resume rule for claude is in force on the host (see `rex config check` there): workers do not come back after a restart"))
     else:
         where = next((l.strip() for l in in_force[at + 1:at + 4] if l.strip().startswith("dir:")), "")
