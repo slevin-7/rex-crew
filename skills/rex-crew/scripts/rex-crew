@@ -63,7 +63,7 @@ def oneline(text, n):
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
-VERSION = "0.1.0-beta"
+VERSION = "0.1.1-beta"
 # While this file exists, every rex call is appended to it (`touch` turns it on, `rm` off): for bug reports.
 DEBUG_LOG = os.path.join(os.path.dirname(LEDGER), "debug.log")
 STOP = os.path.join(os.path.dirname(LEDGER), "stop")  # the emergency stop: while it exists nothing is typed, approved or started
@@ -486,6 +486,25 @@ def asks(scr):
     tail = lines[:cut][-8:]
     hit = next((l for l in reversed(tail) if re.search(r"[?？][*`_)\]\s]*$", l)), None)
     return oneline(hit, 300) if hit else None
+
+
+LIMIT = re.compile(r"hit your (\S+ )*limit|limit reached|usage limit", re.I)
+
+
+def paused(scr):
+    """Why a worker that ended its turn is not finished: ('job', '1 shell') when Claude Code's footer (below the input
+    box) shows a background shell or monitor of its own, which starts its next turn when it ends; ('limit', 'resets 3pm')
+    when its last lines say it hit the usage limit. None otherwise."""
+    lines = [l.strip() for l in scr.splitlines() if l.strip() and "──────────" not in l]
+    cut = max((i for i, l in enumerate(lines) if re.match(r"^(❯|›|>)(\s|$)", l)), default=len(lines))
+    job = next((m.group(0) for l in lines[cut + 1:] for m in [re.search(r"\b\d+ (shells?|monitors?)\b", l)] if m), None)
+    if job:
+        return "job", job
+    hit = next((l for l in reversed(lines[:cut][-15:]) if LIMIT.search(l)), None)
+    if hit:
+        r = re.search(r"(?:resets?(?: at)?|try again at)\s+([^·()\n.]{1,30})", hit, re.I)
+        return "limit", oneline(f"resets {r.group(1).strip()}" if r else "reset time not shown", 60)
+    return None
 
 
 def dialog_open(scr):
@@ -937,6 +956,16 @@ def relink(rex, run):
     return True
 
 
+def ended(rex, run):
+    """A turn that ended while the worker's own background job still runs is not the end: it takes another turn then."""
+    p = paused(rex.screen(run["block"], 40))
+    if p and p[0] == "job":
+        run["job"] = p[1]
+        return None
+    run.pop("job", None)
+    return {"state": "done"}
+
+
 def tick(rex, run, policy):
     """Look at one worker once. Returns None while it works, or a result dict when it stops."""
     approve, never = policy
@@ -963,12 +992,12 @@ def tick(rex, run, policy):
         run["seen"] = True
         watch_screen(rex, run)
     elif state == "done" and (run.get("seen") or age > 30):
-        return {"state": "done"}
+        return ended(rex, run)
     elif state in ("idle", "done") and (run.get("seen") or age > 30 or state == "done"):
         # idle for one look can be the gap between two turns, and a young done we never saw working may be stale: see it twice
         run["idle"] = run.get("idle", 0) + 1
         if run["idle"] >= 2:
-            return {"state": "done"}
+            return ended(rex, run)
     elif state == "error":
         return {"state": "error", "question": rec.get("msg", "")}
     elif state == "blocked":
@@ -1341,8 +1370,12 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False, as_json=Fals
                     pass
             if res["state"] == "done":
                 res.update(finish(rex, r))
-                q = None if res["report"] else asks(rex.screen(r["block"], 40))
-                if q:
+                scr = "" if res["report"] else rex.screen(r["block"], 40)
+                q, p = asks(scr), paused(scr)
+                if p and p[0] == "limit":
+                    res["attention"].append(f"the worker stopped at the usage limit ({p[1]}): after the reset, "
+                                            f"`rex-crew send {r['name']} continue`, then collect again")
+                elif q:
                     res["question"] = q
                     res["attention"].append(f"no report, and the worker's last words end with a question (below): it may wait for you. "
                                             f"Answer with `rex-crew send {r['name']} TEXT`, then collect again")
@@ -1401,7 +1434,7 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False, as_json=Fals
                 emit_json(run_json(r, {"state": "working"}))
         else:
             print("still working: " + ", ".join(
-                r["name"] + (f" (screen unchanged {fmt_age(stalled_for(r))}: look at it)" if stalled_for(r) >= STALL_AFTER else "") for r in runs))
+                r["name"] + (f" (turn ended, waits on its own background job: {r['job']})" if r.get("job") else f" (screen unchanged {fmt_age(stalled_for(r))}: look at it)" if stalled_for(r) >= STALL_AFTER else "") for r in runs))
         worst = max(worst, EXIT["timeout"])  # an unclean result must not hide that someone is still working
     if brief and not as_json:
         order = ("done", "unclean", "needs you", "gone", "timeout")
@@ -1671,7 +1704,12 @@ def watch_events(rex, runs, memo, now):
         elif state in ("idle", "done") and (m["seen"] or age > 30 or state == "done"):
             m["gone"], m["idle"] = 0, m["idle"] + 1
             if (state == "done" and (m["seen"] or age > 30)) or m["idle"] >= 2:
-                ends = " and its last words end with a question (it may wait for you)" if asks(rex.screen(b, 40)) else ""
+                scr = rex.screen(b, 40)
+                p = paused(scr)
+                if p and p[0] == "job":
+                    continue  # its own background job starts its next turn
+                ends = (f" at the usage limit ({p[1]})" if p else
+                        " and its last words end with a question (it may wait for you)" if asks(scr) else "")
                 out.append((f"done:{b}:{m['t0']}", f"worker {name} finished its turn{ends}: `rex-crew collect {name}`"))
         elif state == "blocked":
             what = {"permission": "a permission prompt", "question": "a question", "auth": "a sign-in"}.get(str(rec.get("kind") or ""), "a person")

@@ -221,6 +221,9 @@ a prompt with control characters or several lines gets no `--match`: read `scree
 A worker that asks in plain text and ends its turn (Codex has no question dialog; Claude Code sometimes does the same) reports `done`, not `blocked`.
 If it wrote no report and its last words end with a question, `collect` says so in an `ATTENTION:` line and prints the question on `|` lines
 (`worker_question` in `--json`); `watch` says the worker "may wait for you". Answer with `send NAME "..."`, then `collect` again.
+A turn that ends while Claude Code's footer shows the worker's own background job (`1 shell`, `1 monitor`) is not the end: Claude Code starts its next turn when the job ends,
+so `collect` keeps waiting ("waits on its own background job") and `watch` stays quiet. A worker that stopped at the usage limit gets an `ATTENTION:` line with the reset time
+(`watch`: "finished its turn at the usage limit"); after the reset, `send NAME continue`.
 A message longer than 800 bytes or with a line break goes in as one bracketed paste, so the agent takes it whole.
 
 ## What "done" means
