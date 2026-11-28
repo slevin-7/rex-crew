@@ -83,6 +83,14 @@ An unclean result is printed as `state: unclean`. A worker counts as finished af
 
 `--brief` prints per worker the header, every `ATTENTION:` line, the git and verify lines and only the report's CHANGED and OPEN sections (capped; a missing
 section is said so, never left out silently), then a tally such as `3 done, 1 unclean, 1 needs you`. Exit codes are unchanged.
+**Cheap subagents, and an advisor** (on `start`, `run`, and as plan keys `"subagent_model"`, `"advisor"` in `fanout`):
+`--subagent-model haiku` lets the worker open subagents, but every one runs on that model (forced: the worker cannot pick a bigger one)
+and none opens subagents of its own. `--advisor opus` lets the worker ask a stronger model for advice mid-task (Claude Code's advisor),
+so the worker itself can run on a cheaper model, e.g. `-- --model sonnet`. Together: `--subagent-model haiku --advisor opus -- --model sonnet`.
+The advisor must be at least as capable as the worker's model; Claude Code refuses to start otherwise.
+Codex: `--subagent-model` sets Codex's default subagent model at low reasoning effort (`agents.default_subagent_model`); a spawn that names
+its own model still wins, and Codex has no depth limit and no advisor (`--advisor` exits 6).
+
 `--preamble FILE` on `start`, `run` and `fanout` (plan key `"preamble"`, relative to the plan; the option wins) appends your standing instructions to every task
 before the report protocol; a missing or empty file exits 6 before anything starts. The protocol already tells workers that plain reads (`git status`,
 `grep -n`, `sed -n`) pass and `sh -c`, `<( )`, `$( )`, env prefixes and other redirects wait for a human: your policy still decides what passes.

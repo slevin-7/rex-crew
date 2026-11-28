@@ -84,7 +84,7 @@ call while the file exists (`touch` it to start, remove it to stop).
 export REX_CREW_HOST=buildbox
 export REX_CREW_SESSION=$(rex-crew session my-task)     # creates the session on the host if missing
 
-rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [--preamble F] [--brief] [--agent claude|codex] [--codex-hooks skip|trust] [-- AGENT_ARGS]
+rex-crew run NAME /abs/dir task.md [--policy F] [--verify CMD] [--verify-timeout SEC] [--trust] [--keep] [--preamble F] [--brief] [--agent claude|codex] [--codex-hooks skip|trust] [--subagent-model M] [--advisor M] [-- AGENT_ARGS]
 
 # several at once: one checkout each, start all, collect
 A=$(rex-crew checkout api /abs/repo --copy .env.example)   # git worktree on branch crew/api
@@ -122,6 +122,14 @@ rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start kill
   "workers": [ { "name": "api", "task_file": "api.md" },
                { "name": "docs", "task": "Document the /v2 endpoints in docs/api.md. Do not touch src/." } ] }
 ```
+
+**Cheap subagents, and an advisor** (on `start`, `run`, and as plan keys `"subagent_model"`, `"advisor"` in `fanout`):
+`--subagent-model haiku` lets the worker open subagents, but every one runs on that model (forced: the worker cannot pick a bigger one)
+and none opens subagents of its own. `--advisor opus` lets the worker ask a stronger model for advice mid-task (Claude Code's advisor),
+so the worker itself can run on a cheaper model, e.g. `-- --model sonnet`. Together: `--subagent-model haiku --advisor opus -- --model sonnet`.
+The advisor must be at least as capable as the worker's model; Claude Code refuses to start otherwise.
+Codex: `--subagent-model` sets Codex's default subagent model at low reasoning effort (`agents.default_subagent_model`); a spawn that names
+its own model still wins, and Codex has no depth limit and no advisor (`--advisor` exits 6).
 
 `--preamble FILE` (on `start`, `run`, `fanout`; in a plan: `"preamble": "file.md"`, relative to the plan, the option wins) appends your standing
 instructions to every task, just before the report protocol. The file must exist and not be empty, or nothing is started (exit 6). The protocol itself

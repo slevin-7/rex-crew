@@ -63,7 +63,7 @@ def oneline(text, n):
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
-VERSION = "0.1.1-beta"
+VERSION = "0.1.2-beta"
 # While this file exists, every rex call is appended to it (`touch` turns it on, `rm` off): for bug reports.
 DEBUG_LOG = os.path.join(os.path.dirname(LEDGER), "debug.log")
 STOP = os.path.join(os.path.dirname(LEDGER), "stop")  # the emergency stop: while it exists nothing is typed, approved or started
@@ -1040,6 +1040,11 @@ def start(rex, a, agent_args):
     agent, hooks = getattr(a, "agent", None) or "claude", getattr(a, "codex_hooks", None)
     check_agent(agent, hooks)
     at_least_one(a.verify_timeout, "--verify-timeout")
+    for opt in ("subagent_model", "advisor"):
+        v = getattr(a, opt, None)
+        if v is not None and ((opt == "advisor" and agent != "claude") or not re.fullmatch(r"[a-z][a-z0-9.-]{1,63}", v)):
+            die(f"--{opt.replace('_', '-')} {v[:40]!r}: " + ("only for claude workers (Codex has no advisor)" if agent != "claude"
+                else "give a model alias (haiku, sonnet, opus) or a model ID"), USAGE)
     try:  # bytes, not text: a task that is not UTF-8 or has CRLF line ends must arrive as written
         task = getattr(a, "task_bytes", None)  # fanout has read it already
         if task is None and a.task == "-":
@@ -1106,11 +1111,18 @@ def launch(rex, a, agent_args, task, claim):
         if "@@PUT ok" not in out:
             die(f"could not put the task into {a.dir} on the host: {out.strip()[-300:]}")
     prompt = f"Read .rex-crew/task-{a.name}.md in this directory and carry it out completely."
+    sub, adv = getattr(a, "subagent_model", None), getattr(a, "advisor", None)
+    if agent == "codex" and sub:  # Codex's own keys; a spawn that names a model still wins (Codex cannot force it)
+        agent_args = ["-c", f'agents.default_subagent_model="{sub}"', "-c", 'agents.default_subagent_reasoning_effort="low"', *agent_args]
     if agent == "codex":  # `codex [OPTIONS] PROMPT`; a variadic option (--image) would swallow the prompt: `--` ends the options
         words = (" ".join(shlex.quote(x) for x in agent_args) + " -- " if agent_args else "") + shlex.quote(prompt)
     else:  # The prompt goes first: --allowedTools is variadic and would swallow it.
         words = shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args)
-    line = (f"export PATH=\"{HOST_PATH}:$PATH\"; cd -- " + d + f" && exec {agent} " + words)
+    # Cheap subagents: every subagent the worker opens runs on this model (forced, so the worker cannot pick a
+    # bigger one), and subagents open no subagents of their own. The advisor: a stronger model the worker consults.
+    env = (f"export CLAUDE_CODE_SUBAGENT_MODEL={sub} CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1; " if sub and agent == "claude" else "")
+    words += f" --advisor {adv}" if adv else ""
+    line = (f"export PATH=\"{HOST_PATH}:$PATH\"; {env}cd -- " + d + f" && exec {agent} " + words)
     try:
         rex_out = ""
         p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)
@@ -1940,7 +1952,7 @@ def cmd_session(rex, a):
 
 # ---- fanout and integrate ----------------------------------------------------------------------------
 
-PLAN_KEYS = {"repo", "base", "copy", "agent", "agent_args", "claude_args", "codex_hooks", "verify", "verify_timeout", "trust", "preamble", "workers"}
+PLAN_KEYS = {"repo", "base", "copy", "agent", "agent_args", "claude_args", "codex_hooks", "verify", "verify_timeout", "trust", "preamble", "workers", "subagent_model", "advisor"}
 WORKER_KEYS = ("name", "task", "task_file", "agent", "agent_args")
 
 def load_plan(path):
@@ -1980,6 +1992,9 @@ def load_plan(path):
         bad('"agent_args" (or "claude_args") must be a list of strings, one per argument')
     if p.setdefault("codex_hooks", None) not in (None, *CODEX_HOOKS):
         bad('"codex_hooks" must be "skip" or "trust" (or left out: a person decides)')
+    for k in ("subagent_model", "advisor"):
+        if p.setdefault(k, None) is not None and not isinstance(p[k], str):
+            bad(f'"{k}" must be a model alias or ID (a string)')
     if p.setdefault("verify", None) is not None and not (isinstance(p["verify"], str) and p["verify"].strip()):
         bad('"verify" must be a shell command (a non-empty string); leave it out for no check')
     vt = p.setdefault("verify_timeout", 600)
@@ -2087,7 +2102,8 @@ def cmd_fanout(rex, a):
         for w, (path, _) in zip(plan["workers"], made):
             ns = argparse.Namespace(name=w["name"], dir=path, task=None, task_bytes=w["body"], verify=plan["verify"],
                                     verify_timeout=plan["verify_timeout"], trust=plan["trust"], keep=False, preamble_bytes=pre,
-                                    agent=w["agent"], codex_hooks=plan["codex_hooks"] if w["agent"] == "codex" else None)
+                                    agent=w["agent"], codex_hooks=plan["codex_hooks"] if w["agent"] == "codex" else None,
+                                    subagent_model=plan["subagent_model"], advisor=plan["advisor"] if w["agent"] == "claude" else None)
             runs.append(start(rex, ns, w["agent_args"]))
     except BaseException as e:  # die() raises SystemExit; Ctrl-C too: leave nothing behind
         fanout_undo(rex, repo, made, runs, inflight)
@@ -2316,6 +2332,10 @@ def main():
         q.add_argument("--agent", choices=AGENTS, default="claude", help="which agent the worker is: claude (Claude Code, default) or codex (Codex CLI)")
         q.add_argument("--codex-hooks", choices=sorted(CODEX_HOOKS), metavar="skip|trust", help="answer Codex's 'Hooks need review' dialog in advance: "
                        "skip = continue without trusting (key 3), trust = trust all (key 2); default: hand it back to a person")
+        q.add_argument("--subagent-model", metavar="MODEL", help="cheap subagents: every subagent the worker opens runs on MODEL. claude (e.g. haiku): forced, "
+                       "and subagents open none of their own. codex (e.g. a mini model): the default, at low reasoning effort")
+        q.add_argument("--advisor", metavar="MODEL", help="claude only: the worker may ask MODEL (e.g. opus) for advice mid-task "
+                       "(Claude Code's advisor); lets a cheaper worker model do the work")
 
     policy_help = "JSON policy file: {approve: [regex], never: [regex]}; without it nothing is answered for you"
     brief_help = "per worker only: header, ATTENTION, git, verify, the report's CHANGED and OPEN (capped); then a one-line tally"
@@ -2378,7 +2398,7 @@ def main():
     ss.add_argument("label"); ss.set_defaults(fn=cmd_session)
 
     fo = sub.add_parser("fanout", help="one checkout and one worker per entry of a plan file; all or nothing")
-    fo.add_argument("plan", help='JSON: {"repo", "base", "copy", "agent", "agent_args" (or "claude_args"), "codex_hooks", "verify", "verify_timeout", "trust", "workers": [{"name", "task_file" or "task", "agent", "agent_args"}]}')
+    fo.add_argument("plan", help='JSON: {"repo", "base", "copy", "agent", "agent_args" (or "claude_args"), "codex_hooks", "verify", "verify_timeout", "trust", "subagent_model", "advisor", "workers": [{"name", "task_file" or "task", "agent", "agent_args"}]}')
     fo.add_argument("--preamble", metavar="FILE", help='standing instructions appended to every task (or the plan key "preamble"; this option wins)')
     fo.set_defaults(fn=cmd_fanout)
     ig = sub.add_parser("integrate", help="merge the workers' branches (crew/NAME) into REPO's current branch, one at a time")
