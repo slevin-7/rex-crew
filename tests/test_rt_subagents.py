@@ -5,7 +5,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_rt_codex as rc  # noqa: E402  (module import: its test classes must not run twice)
 
-FORCED = "CLAUDE_CODE_SUBAGENT_MODEL=haiku CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1"
+FORCED = '--settings \'{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"haiku","CLAUDE_CODE_SUBAGENT_MODEL_FORCE":"1","CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH":"1"}}\''
 
 
 class Subagents(rc.Codex):
@@ -20,7 +20,7 @@ class Subagents(rc.Codex):
         line = self.prog("w1")
         self.assertIn(FORCED, line)
         self.assertIn("--advisor opus", line)
-        self.assertLess(line.index(FORCED), line.index("exec claude"))
+        self.assertLess(line.index("exec claude"), line.index(FORCED))
 
     def test_without_the_options_nothing_is_added(self):
         self.go()
@@ -31,6 +31,11 @@ class Subagents(rc.Codex):
         code, _, err = self.go("--subagent-model", "haiku; rm -rf ~")
         self.assertEqual(code, 6, err)
         self.assertIn("model alias", err)
+
+    def test_own_settings_and_subagent_model_do_not_mix(self):
+        code, _, err = self.go("--subagent-model", "haiku", "--", "--settings", "{}")
+        self.assertEqual(code, 6, err)
+        self.assertIn("your --settings", err)
 
     def test_codex_has_no_advisor(self):
         code, _, err = self.go("--agent", "codex", "--advisor", "opus")

@@ -1045,6 +1045,8 @@ def start(rex, a, agent_args):
         if v is not None and ((opt == "advisor" and agent != "claude") or not re.fullmatch(r"[a-z][a-z0-9.-]{1,63}", v)):
             die(f"--{opt.replace('_', '-')} {v[:40]!r}: " + ("only for claude workers (Codex has no advisor)" if agent != "claude"
                 else "give a model alias (haiku, sonnet, opus) or a model ID"), USAGE)
+    if getattr(a, "subagent_model", None) and agent == "claude" and "--settings" in agent_args:
+        die("--subagent-model passes its own --settings to claude: put CLAUDE_CODE_SUBAGENT_MODEL into your --settings JSON's env instead", USAGE)
     try:  # bytes, not text: a task that is not UTF-8 or has CRLF line ends must arrive as written
         task = getattr(a, "task_bytes", None)  # fanout has read it already
         if task is None and a.task == "-":
@@ -1119,10 +1121,14 @@ def launch(rex, a, agent_args, task, claim):
     else:  # The prompt goes first: --allowedTools is variadic and would swallow it.
         words = shlex.quote(prompt) + " " + " ".join(shlex.quote(x) for x in agent_args)
     # Cheap subagents: every subagent the worker opens runs on this model (forced, so the worker cannot pick a
-    # bigger one), and subagents open no subagents of their own. The advisor: a stronger model the worker consults.
-    env = (f"export CLAUDE_CODE_SUBAGENT_MODEL={sub} CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1 CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1; " if sub and agent == "claude" else "")
+    # bigger one), and subagents open no subagents of their own. Passed as --settings, not exported: an "env" block
+    # in the host's ~/.claude/settings.json beats the process environment, the command line beats both.
+    # The advisor: a stronger model the worker consults.
+    if sub and agent == "claude":
+        words += " --settings " + shlex.quote(json.dumps({"env": {"CLAUDE_CODE_SUBAGENT_MODEL": sub, "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+                                                                  "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "1"}}, separators=(",", ":")))
     words += f" --advisor {adv}" if adv else ""
-    line = (f"export PATH=\"{HOST_PATH}:$PATH\"; {env}cd -- " + d + f" && exec {agent} " + words)
+    line = (f"export PATH=\"{HOST_PATH}:$PATH\"; cd -- " + d + f" && exec {agent} " + words)
     try:
         rex_out = ""
         p = rex.call("run", "-s", rex.session, "--label", a.name, "--keep-open", "--focus=false", "--json", "--", "sh", "-c", line)

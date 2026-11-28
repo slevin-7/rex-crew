@@ -128,6 +128,7 @@ rex-crew strays [--adopt | --close]  # panes no ledger entry knows (a start kill
 and none opens subagents of its own. `--advisor opus` lets the worker ask a stronger model for advice mid-task (Claude Code's advisor),
 so the worker itself can run on a cheaper model, e.g. `-- --model sonnet`. Together: `--subagent-model haiku --advisor opus -- --model sonnet`.
 The advisor must be at least as capable as the worker's model; Claude Code refuses to start otherwise.
+For claude, `--subagent-model` goes in as `--settings` (it beats an `env` block in the host's `~/.claude/settings.json`), so it can't be combined with your own `--settings`.
 Codex: `--subagent-model` sets Codex's default subagent model at low reasoning effort (`agents.default_subagent_model`); a spawn that names
 its own model still wins, and Codex has no depth limit and no advisor (`--advisor` exits 6).
 
