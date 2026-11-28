@@ -1,0 +1,10 @@
+{
+  "name": "rex-crew",
+  "version": "0.1.0-beta",
+  "description": "Run Claude Code or Codex workers in Rex panes, answer routine prompts from a policy, get a written report back",
+  "author": {
+    "name": "slevin-7"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/slevin-7/rex-crew"
+}

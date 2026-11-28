@@ -246,6 +246,20 @@ class TestStartAndSend(Base):
         self.assertEqual(code, 0, err)
         self.assertEqual([(s["kind"], s["value"]) for s in self.fake()["sent"]], [("text", "next step"), ("key", "enter")])
 
+    def test_long_or_multiline_send_is_one_bracketed_paste(self):
+        d = self.workdir()
+        self.script("w1", rec("idle"))
+        self.cli("start", "w1", d, self.task)
+        for text in ("x" * 900, "first line\nsecond line"):
+            st = self.fake(); st["sent"] = []
+            with open(self.fake_state, "w") as f:
+                json.dump(st, f)
+            code, _, err = self.cli("send", self.block_of("w1"), text)
+            self.assertEqual(code, 0, err)
+            sent = self.fake()["sent"]
+            self.assertEqual(sent[0]["value"], f"\x1b[200~{text}\x1b[201~")
+            self.assertEqual(sent[-1], {"block": self.block_of("w1"), "kind": "key", "value": "enter"})
+
     def test_send_refuses_the_orchestrators_own_pane(self):
         d = self.workdir()
         self.script("w1", rec("idle"))

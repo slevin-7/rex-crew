@@ -1,0 +1,13 @@
+name: test
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: selftest (policy matcher, no Rex needed)
+        run: python3 skills/rex-crew/scripts/rex-crew selftest
+      - name: tests against the fake Rex host
+        run: sh tests/run.sh

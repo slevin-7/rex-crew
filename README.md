@@ -59,6 +59,14 @@ Rex is in beta: commands may change.
 
 ## Install
 
+As a Claude Code plugin (Claude Code 2.1.275 or later), for the skill only; it runs the CLI from inside the plugin:
+
+```
+/plugin install rex-crew --marketplace slevin-7/rex-crew
+```
+
+Or from a clone, which also puts `rex-crew` on your PATH:
+
 ```sh
 git clone https://github.com/slevin-7/rex-crew ~/src/rex-crew
 ~/src/rex-crew/install.sh          # links the CLI into ~/.local/bin and the skill into ~/.claude/skills
@@ -67,6 +75,8 @@ git clone https://github.com/slevin-7/rex-crew ~/src/rex-crew
 Nothing is copied; `install.sh --uninstall` removes the two links. Agents then find the skill as `rex-crew`.
 On each new host, run `rex-crew -S HOST -s SESSION doctor` once: it checks the agents, Rex's Claude Code hook and
 Rex's resume rule, and says which live workers come back after a Rex server restart.
+For a bug report, include `rex-crew --version` and the lines of `~/.local/state/rex-crew/debug.log`: it logs every rex
+call while the file exists (`touch` it to start, remove it to stop).
 
 ## Use
 

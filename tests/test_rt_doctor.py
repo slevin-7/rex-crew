@@ -68,5 +68,23 @@ class TestDoctor(Base):
         self.assertIn("note  worker w2", out)
 
 
+    def test_debug_log_only_while_its_file_exists(self):
+        self.host()
+        log = os.path.join(os.path.dirname(self.ledger), "debug.log")
+        self.cli("doctor")
+        self.assertFalse(os.path.exists(log))
+        open(log, "w").close()
+        code, out, _ = self.cli("doctor")
+        self.assertIn(f"rex-crew {self.mod.VERSION}; debug log on", out)
+        with open(log) as f:
+            lines = f.read().splitlines()
+        self.assertTrue(lines and all(" exit " in l and "rex-crew" in l for l in lines), lines)
+        self.assertTrue(any(" run -s s1 " in l for l in lines), lines)
+
+    def test_version(self):
+        code, out, _ = self.cli("--version")
+        self.assertEqual((code, out.strip()), (0, f"rex-crew {self.mod.VERSION}"))
+
+
 if __name__ == "__main__":
     unittest.main()

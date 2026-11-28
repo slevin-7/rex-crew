@@ -58,7 +58,7 @@ class TestDocExamplesParse(Base):
         n = 0
         for name, doc in (("README", README), ("SKILL", SKILL)):
             for words in doc_commands(doc):
-                if words[0] == "selftest":
+                if words[0] in ("selftest", "--version"):  # both answer before the parser returns
                     continue
                 code, err, seen = self.parse(words)
                 self.assertEqual((code, len(seen)), (0, 1), f"{name}: rex-crew {' '.join(words)}: {err}")

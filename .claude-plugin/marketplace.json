@@ -1,0 +1,14 @@
+{
+  "name": "rex-crew",
+  "description": "rex-crew: orchestrate Claude Code and Codex workers in Rex panes",
+  "owner": {
+    "name": "slevin-7"
+  },
+  "plugins": [
+    {
+      "name": "rex-crew",
+      "source": "./",
+      "description": "Run Claude Code or Codex workers in Rex panes, answer routine prompts from a policy, get a written report back"
+    }
+  ]
+}

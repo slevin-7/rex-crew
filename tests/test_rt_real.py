@@ -106,7 +106,7 @@ class Real(Base):
         code, out, err = self.cli("send", self.block_of("w1"), text)
         self.assertEqual(code, 0, out + err)
         typed = [s["value"] for s in self.sent() if s["kind"] == "text"]
-        self.assertEqual("".join(typed), text)
+        self.assertEqual("".join(typed), f"\x1b[200~{text}\x1b[201~")  # a long message is one bracketed paste
 
     def test_oversized_sh_command_says_why(self):
         code, out, err = self.cli("sh", "echo " + "x" * 70000)

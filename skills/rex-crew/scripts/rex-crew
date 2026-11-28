@@ -63,6 +63,9 @@ def oneline(text, n):
 
 SELF = os.environ.get("REX_BLOCK", "")
 LEDGER = os.path.expanduser(os.environ.get("REX_CREW_STATE", "~/.local/state/rex-crew/runs.json"))
+VERSION = "0.1.0-beta"
+# While this file exists, every rex call is appended to it (`touch` turns it on, `rm` off): for bug reports.
+DEBUG_LOG = os.path.join(os.path.dirname(LEDGER), "debug.log")
 STOP = os.path.join(os.path.dirname(LEDGER), "stop")  # the emergency stop: while it exists nothing is typed, approved or started
 REPORT_MAX = 100000  # bytes of the worker's report that are read back
 WAIT_AFTER = 120  # seconds a prompt may be open before collect says LONG WAIT (--waiting-after)
@@ -187,6 +190,19 @@ def jload(text):
     raise ValueError("no JSON in rex output")
 
 
+def debug(cmd, p, secs):
+    """One line per rex call into DEBUG_LOG, if it exists. Arguments are cut short: a task travels base64-encoded."""
+    if not os.path.exists(DEBUG_LOG):
+        return
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} rex-crew {VERSION} {secs:.2f}s exit {p.returncode}: "
+                    + " ".join(oneline(x, 80) for x in cmd[1:])[:400]
+                    + (f" | stderr: {oneline(p.stderr, 200)}" if p.returncode else "") + "\n")
+    except OSError:
+        pass  # a log that cannot be written must not stop the work
+
+
 class Rex:
     def __init__(self, host, session):
         self.host, self.session = host, session
@@ -194,7 +210,7 @@ class Rex:
     def call(self, *args, check=True, wait=None):
         """One rex call, bounded: a host that stops answering is an error that names it, not a hang forever."""
         cmd = ["rex"] + (["-S", self.host] if self.host else []) + list(args)
-        limit = wait or rpc_timeout()
+        limit, t0 = wait or rpc_timeout(), time.time()
         try:
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
         except OSError as e:  # no rex on PATH, not executable: a host failure, not a traceback
@@ -202,6 +218,7 @@ class Rex:
         except subprocess.TimeoutExpired:
             die(f"rex {' '.join(args[:3])} on {self.host or 'this machine'} did not answer within {limit:g}s: the Rex host "
                 "is not responding (set REX_CREW_TIMEOUT to wait longer)")
+        debug(cmd, p, time.time() - t0)
         if check and p.returncode != 0:
             die(f"rex {' '.join(args[:3])} failed: {p.stderr.strip()[:300]}")
         return p
@@ -459,6 +476,16 @@ def input_region(scr, below=False):
 
 
 DIALOG_WORDS = re.compile(r"do you want to|would you like to|esc to cancel|enter to (select|confirm)|trust this folder|do you trust|hooks? needs? review", re.I)
+
+
+def asks(scr):
+    """The worker's last words, if they end with a question: an agent that asks in plain text (Codex has no question
+    dialog, Claude Code often does the same) ends its turn and reports idle or done. Its input box and footer do not count."""
+    lines = [l.strip() for l in scr.splitlines() if l.strip() and "──────────" not in l]
+    cut = max((i for i, l in enumerate(lines) if re.match(r"^(❯|›|>)(\s|$)", l)), default=len(lines))
+    tail = lines[:cut][-8:]
+    hit = next((l for l in reversed(tail) if re.search(r"[?？][*`_)\]\s]*$", l)), None)
+    return oneline(hit, 300) if hit else None
 
 
 def dialog_open(scr):
@@ -894,6 +921,22 @@ def press_claim(run, text):
         return "go"
 
 
+def relink(rex, run):
+    """The worker's pane is no longer listed under its id. After a Rex server restart the pane may come back under a
+    new id with its label (the worker's NAME): follow exactly one such pane that no ledger entry knows. True if it did."""
+    panes = rex.panes()
+    if not panes:
+        return False
+    known = {r.get("block") for r in ledger_raw()}
+    found = [b for b in panes if b.get("label") == run["name"] and b.get("block_id") not in known]
+    if len(found) != 1:
+        return False
+    warn(f"{run['name']}: its pane {oneline(run['block'], 60)} is gone, a pane labelled {run['name']} is there as "
+         f"{oneline(found[0]['block_id'], 60)} (a Rex server restart): following it")
+    run["block"] = found[0]["block_id"]  # collect writes the entry with its next save
+    return True
+
+
 def tick(rex, run, policy):
     """Look at one worker once. Returns None while it works, or a result dict when it stops."""
     approve, never = policy
@@ -910,7 +953,11 @@ def tick(rex, run, policy):
     if state == "gone":  # one failed status call is not a vanished pane: ask again on the next pass
         run["gone"] = run.get("gone", 0) + 1
         # A failed or garbled answer reads as "gone" as well; only a pane the host no longer lists is gone.
-        return {"state": "gone"} if run["gone"] >= 2 and rex.alive(run["block"]) is False else None
+        if run["gone"] >= 2 and rex.alive(run["block"]) is False:
+            if not relink(rex, run):
+                return {"state": "gone"}
+            run.pop("gone", None)
+        return None
     run.pop("gone", None)
     if state == "working":
         run["seen"] = True
@@ -1191,7 +1238,7 @@ def run_json(run, res, note=None):
             "keep": bool(run.get("keep")), "auto_approved_count": len(approved),
             "worker_auto_approved": [oneline(x, 60) for x in approved[-5:]],
             "kind": oneline(res.get("kind") or state, 30) if state in ("blocked", "error") else None,
-            "worker_question": clean(res.get("question") or "") if state in ("blocked", "error") else None,
+            "worker_question": clean(res.get("question") or "") if state in ("blocked", "error") or res.get("question") else None,
             "worker_prompt": clean(res.get("prompt") or "") if state in ("blocked", "error") else None,
             "worker_answer_commands": answer_lines(run, res) if state in ("blocked", "error") and "block" in run else [],
             "attention": [clean(x) for x in res.get("attention") or []],
@@ -1222,6 +1269,8 @@ def show(run, res, brief=False):
     if "git" in res:
         for x in res["attention"]:
             print(f"ATTENTION: {x}")
+        if res.get("question") and res["state"] not in ("blocked", "error"):
+            print("question:\n" + data(clean(res["question"])))
         print("git: " + " · ".join(oneline(x, 300) for x in res["git"].splitlines()))
         if res["verify_rc"] == "none":
             print("verify: not run (no --verify given): nothing here shows the work passes its checks")
@@ -1292,6 +1341,11 @@ def collect(rex, policy, timeout, only=None, rid=None, brief=False, as_json=Fals
                     pass
             if res["state"] == "done":
                 res.update(finish(rex, r))
+                q = None if res["report"] else asks(rex.screen(r["block"], 40))
+                if q:
+                    res["question"] = q
+                    res["attention"].append(f"no report, and the worker's last words end with a question (below): it may wait for you. "
+                                            f"Answer with `rex-crew send {r['name']} TEXT`, then collect again")
                 if res.get("attention"):  # decided before anything is printed: show() must say what counts
                     r["state"] = res["state"] = "unclean"
                 if not r.get("keep") and not res.get("attention"):  # an unclean worker keeps its pane: screen, then send
@@ -1484,7 +1538,10 @@ def cmd_send(rex, a):
             "then close it or start a new one", EXIT["gone"])
     if dialog_open(rex.screen(a.block, 40)):
         die(f"not sent: a dialog is open on the worker's screen although it reports {state}; look with `rex-crew screen {a.block}`", EXIT["blocked"])
-    rex.type(a.block, text)
+    # A long or multi-line message goes in as one bracketed paste: typed raw, Claude Code takes it as a paste in parts and
+    # the Return can come before the end, and a line break would submit early (reported on Rex's Discord, 15.11.2026).
+    pasted = len(text.encode()) > 800 or "\n" in text
+    rex.type(a.block, f"\x1b[200~{text}\x1b[201~" if pasted else text)
     for _ in range(6):  # Return only once the input box shows the text: typed elsewhere it would answer something else
         time.sleep(0.5)
         scr = rex.screen(a.block, 40)
@@ -1614,7 +1671,8 @@ def watch_events(rex, runs, memo, now):
         elif state in ("idle", "done") and (m["seen"] or age > 30 or state == "done"):
             m["gone"], m["idle"] = 0, m["idle"] + 1
             if (state == "done" and (m["seen"] or age > 30)) or m["idle"] >= 2:
-                out.append((f"done:{b}:{m['t0']}", f"worker {name} finished its turn: `rex-crew collect {name}`"))
+                ends = " and its last words end with a question (it may wait for you)" if asks(rex.screen(b, 40)) else ""
+                out.append((f"done:{b}:{m['t0']}", f"worker {name} finished its turn{ends}: `rex-crew collect {name}`"))
         elif state == "blocked":
             what = {"permission": "a permission prompt", "question": "a question", "auth": "a sign-in"}.get(str(rec.get("kind") or ""), "a person")
             out.append((f"blocked:{b}:{oneline(rec.get('updated_at', ''), 40)}:{m['t0']}",
@@ -1742,7 +1800,8 @@ def cmd_doctor(rex, a):
     """Is the host ready for workers, and which live workers come back after a Rex server restart? Exit 1 if anything is not."""
     _, out = rex.sh(DOCTOR_SH)
     lines = [l for l in out.splitlines() if l.startswith("@@")]
-    rows = []  # (level, text); level ok | note | warn | FAIL
+    rows = [("note", f"rex-crew {VERSION}; debug log " + (f"on ({DEBUG_LOG})" if os.path.exists(DEBUG_LOG) else f"off (turn on: touch {DEBUG_LOG})"))]
+    # rows: (level, text); level ok | note | warn | FAIL
     for l in lines:
         if l.startswith("@@AGENT "):
             name, _, ver = l[8:].partition(" ")
@@ -2199,6 +2258,7 @@ def main():
                                 epilog="exit: 0 clean, 1 unclean, 2 needs you, 3 timeout, 4 error (host failure too), 5 pane gone, 6 usage (bad input, unknown NAME)\n"
                                        "rex-crew selftest   check the policy matcher (needs no Rex)\n"
                                        "rex-crew COMMAND --help   options of one command")
+    p.add_argument("--version", action="version", version=f"rex-crew {VERSION}")
     p.add_argument("-S", "--host", default=os.environ.get("REX_CREW_HOST"), help="Rex host label (default: this machine)")
     p.add_argument("-s", "--session", default=os.environ.get("REX_CREW_SESSION"), help="session id on that host")
     sub = p.add_subparsers(dest="cmd", required=True)

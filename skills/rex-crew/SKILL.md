@@ -218,6 +218,11 @@ Then `collect` again. `needs you (question): ...` shows the question and its opt
 (with `-S`/`-s` filled in). For a permission prompt the `approve` line carries `--match` for exactly that prompt, so it presses Yes only if the prompt is still the one shown;
 a prompt with control characters or several lines gets no `--match`: read `screen BLOCK` first. Control characters in worker text are printed as `?`.
 
+A worker that asks in plain text and ends its turn (Codex has no question dialog; Claude Code sometimes does the same) reports `done`, not `blocked`.
+If it wrote no report and its last words end with a question, `collect` says so in an `ATTENTION:` line and prints the question on `|` lines
+(`worker_question` in `--json`); `watch` says the worker "may wait for you". Answer with `send NAME "..."`, then `collect` again.
+A message longer than 800 bytes or with a line break goes in as one bracketed paste, so the agent takes it whole.
+
 ## What "done" means
 
 `state: done` says the worker's turn ended. `ATTENTION:` lines say when that is not a clean result: no report file,
@@ -238,7 +243,9 @@ exit 1, so read the lines above a worker's summary first.
 | `session LABEL` | The id of the session with that label on the host, created if missing. |
 | `doctor` | Is the host ready: claude (and codex) on its PATH, Rex's Claude Code hook installed, Rex's resume rule for claude in force. Then, per live worker, whether it comes back after a Rex server restart (and why not). Exit 1 if anything is not. Run it once per new host. |
 
-After a Rex server restart, a Claude Code worker comes back in its pane, in the same conversation, with the flags Rex's rule keeps (Rex's own hook reports it; nothing in rex-crew does). The task prompt is not sent again. Codex workers come back as a plain shell. Not checked yet: whether the pane keeps its block id, which the ledger relies on; after a restart, `status --all` and `strays` show what is there.
+After a Rex server restart, a Claude Code worker comes back in its pane, in the same conversation, with the flags Rex's rule keeps (Rex's own hook reports it; nothing in rex-crew does). The task prompt is not sent again. Codex workers come back as a plain shell. If a worker's pane comes back under a new id, `collect` follows the one pane labelled with the worker's NAME that no ledger entry knows (and says so); with two such panes it reports `gone` rather than guess. Not checked on a real restart yet; `status --all` and `strays` show what is there.
+
+Bug reports: `rex-crew --version`, and `touch ~/.local/state/rex-crew/debug.log` (next to `REX_CREW_STATE`) logs every rex call until the file is removed.
 
 ## Method: what real runs taught
 
